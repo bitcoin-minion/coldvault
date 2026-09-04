@@ -121,17 +121,30 @@ machine.
 No command line. About 30 minutes. You will need your cPanel login and a domain or
 subdomain you can point at this.
 
-### A1. Check your PHP version first
+### A1. Check that PHP 8.1+ is available at all
 
-Coldvault needs **PHP 8.1 or newer**. If your host is on something older, the rest of this
-will not work, so check now.
+Coldvault needs **PHP 8.1 or newer**. Check before you spend time on the rest.
 
-In cPanel, open **MultiPHP Manager**. Find your domain in the list and look at the PHP
-version column. If it is below 8.1, tick the domain, choose 8.1 or newer from the dropdown,
-and click **Apply**.
+In cPanel, open **MultiPHP Manager**. Ignore the list of domains for now — just open the
+version dropdown and see what is on offer. You want **8.1, 8.2 or 8.3** to appear.
 
-If you cannot find MultiPHP Manager, or the newest option is below 8.1, contact your host
-and ask them to put your account on PHP 8.1+. Do not continue until they have.
+If MultiPHP Manager is missing, or the newest option is below 8.1, contact your host and
+ask them to move your account to PHP 8.1+.
+
+> **Why 8.1 and not just "whatever works"?** The code itself is compatible with PHP 7.4 —
+> that was tested, it parses and runs — so it will *appear* to work on an old version. The
+> reason to insist on 8.1+ is that **PHP 7.4 stopped receiving security patches in November
+> 2022.** Running a vault that holds recovery phrases on an unpatched language runtime
+> undoes much of the point of the exercise. Insist on it for that reason, not because the
+> app will crash.
+
+> **You will come back here in step A3a to set the version for the subdomain itself.**
+> Do not bother setting it for your existing domain now — it will not carry over. The
+> reason is worth knowing, because it is easy to get wrong: **a new subdomain does not
+> inherit its parent domain's PHP version.** It appears as its own row in MultiPHP Manager
+> with its own setting. (Tested on cPanel 11.136: a parent domain running PHP 7.4 produced
+> new subdomains running 8.1, entirely independently.) So the version has to be set *after*
+> the subdomain exists.
 
 ### A2. Decide where the files go — this part matters
 
@@ -194,8 +207,48 @@ Use your real account name. Then create it.
 > **Document root** just means "the folder this web address shows." Setting it to `public`
 > is what keeps `coldvault.env` — which lives one level above — unreachable.
 
-If cPanel refuses a path outside `public_html`, see
+**This does work.** It was tested on cPanel 11.136: a document root of
+`/home/ACCOUNT/coldvault/public` was accepted exactly as typed, not silently rewritten
+back inside `public_html`, and a file placed there was served correctly. If your host has
+locked this down and cPanel refuses the path or quietly changes it, check what it actually
+saved and then see
 [A11: if your host will not allow that](#a11-if-your-host-will-not-allow-a-docroot-outside-public_html).
+
+#### cPanel will add some files of its own — leave them alone
+
+The moment you create the subdomain, cPanel writes several things into the document root
+that you did not put there:
+
+| File | What it is |
+|---|---|
+| `.htaccess` | cPanel's PHP handler and error-log settings |
+| `php.ini`, `.user.ini` | PHP settings for this folder |
+| `cgi-bin/` | An empty folder cPanel always creates |
+| `.well-known/` | Appears later, when AutoSSL validates your certificate (step A9) |
+
+This is normal. Two things worth knowing:
+
+- **Your `.htaccess` is not destroyed.** Coldvault ships its own `.htaccess` in `public/`,
+  and cPanel **appends** its block to the existing file rather than replacing it (verified
+  by test). So if you uploaded in step A2 before creating the subdomain here, both sets of
+  rules are present and both work.
+- **Do not delete cPanel's block.** The lines between `# BEGIN cPanel-generated` and
+  `# END cPanel-generated` are what tell the server which PHP version to use. Removing
+  them can break the site.
+
+### A3a. Now set the PHP version for the subdomain
+
+The subdomain has its own PHP setting, separate from your other domains — see the note in
+[A1](#a1-check-that-php-81-is-available-at-all).
+
+Go back to **MultiPHP Manager**. Your new subdomain now appears as its own row. Tick it,
+choose **8.1** or newer from the dropdown, and click **Apply**.
+
+Confirm the row shows the version you picked before moving on.
+
+Do not skip this on the basis that the site seems to work anyway — it very likely will,
+since the code runs on 7.4 too. The problem with an old version here is silent: you get a
+working vault on an unpatched runtime, and nothing will ever tell you.
 
 ### A4. Create the database
 
@@ -211,6 +264,12 @@ In cPanel, open **MySQL® Databases**:
 2. Scroll to *MySQL Users → Add New User*. Username `coldvault` (again, cPanel adds a
    prefix). Click **Password Generator**, then **Use Password**, and **copy the password
    somewhere before you close that box.** Click **Create User**.
+
+   > **Keep the username short.** cPanel caps a database username at **32 characters
+   > including the prefix**, and the prefix is your whole account name plus an underscore.
+   > If your account name is long, `coldvault` may not fit — use `cv` instead. cPanel shows
+   > you the remaining allowance as you type. Whatever it ends up as, use the **full
+   > prefixed name** in step A7.
 3. Scroll to *Add User To Database*. Select the user and the database you just made, click
    **Add**. On the privileges page tick **ALL PRIVILEGES**, then **Make Changes**.
 
@@ -232,7 +291,8 @@ You should see a green success message. Click the database name again; the sideb
 now list **six** tables: `vault`, `vault_backup_codes`, `vault_invite`, `vault_keyslot`,
 `vault_reg_throttle`, `vault_users`.
 
-The file is about 9 KB, so it is far below any upload limit.
+The file is about 9 KB. phpMyAdmin normally caps uploads at 2 MB (that was the exact
+limit on the cPanel this guide was tested against), so it fits with room to spare.
 
 ### A6. Make your APP_KEY
 
