@@ -362,6 +362,55 @@ issue.
 
 ---
 
+## Contributing
+
+Issues and pull requests are welcome. Three things worth knowing before you start:
+
+- **Read [SECURITY.md](SECURITY.md)** if you are touching the cryptography, the
+  authorization model, or sessions. Several decisions in there look arbitrary until you know
+  what they were a response to — authorization lives inside the functions that write, and
+  removing someone rotates the key rather than deleting a row, for reasons that are
+  documented.
+- **Run `php tools/kwcheck.php --selftest`** after any change to the keyword strength
+  estimator. It exists in four places that must agree, and the self-test is the only thing
+  standing between you and a client that accepts what the server refuses.
+- **Never add a second Content-Security-Policy.** Two are both enforced, and the overlap
+  blocks the application's own scripts. The policy belongs in `config.php`, because the
+  nonce has to be generated per request.
+
+Documentation fixes are as welcome as code. If you follow
+[GETTING-STARTED.md](GETTING-STARTED.md) on a host or control panel it does not yet cover,
+a note on what differed is genuinely useful — that guide was written against a limited
+number of environments.
+
+**Please report vulnerabilities privately**, through a security advisory rather than a
+public issue, and reproduce with throwaway values — never a real recovery phrase, keyword
+or `APP_KEY`.
+
+---
+
+## Support
+
+Coldvault is free and MIT-licensed. There is no company behind it, no hosted tier, no
+telemetry, and nothing to upsell — which is deliberate, given what it stores.
+
+The most valuable contribution is not money. It is a careful read of the cryptography and
+the authorization model by someone who did not write them, since this code has had no
+third-party audit. Second to that: a clear bug report, or a documentation fix for an
+environment the install guide gets wrong.
+
+If it is useful to you anyway and you would like to send something:
+
+**Bitcoin** (native segwit, mainnet)
+
+```
+bc1qn23j9lxl4ckn0uyeq2n6ep20ljr8shszxvcsa6
+```
+
+No obligation, no expectations, and it buys no influence over the project's direction.
+
+---
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
