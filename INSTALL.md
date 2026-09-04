@@ -5,6 +5,13 @@ the database structure, and the `APP_KEY`.
 
 Budget about 20 minutes. Nothing here needs Composer, Node, or a build step.
 
+> **This page assumes you are comfortable with a Linux command line, Apache configuration
+> and a database client.** If you are not, read
+> **[GETTING-STARTED.md](GETTING-STARTED.md)** instead — same process, explained from
+> scratch, with a path for cPanel shared hosting that needs no command line at all, and one
+> for simply trying it on your own computer. Unfamiliar term? See
+> [GLOSSARY.md](GLOSSARY.md).
+
 **Contents**
 
 1. [Install the packages](#1-install-the-packages)
@@ -387,7 +394,7 @@ The two curls above confirm it.
 1. Open `https://vault.example.com/register/`.
 2. Pick a username (3–32 characters: letters, digits, `_`, `.`, `-`) and solve the CAPTCHA.
 3. Scan the QR code with any TOTP authenticator, then enter the 6-digit code it shows.
-4. **Save the 10 backup codes.** They are shown once and stored only as hashes. Without
+4. **Save the eight backup codes.** They are shown once and stored only as hashes. Without
    them, a lost phone means a lost account.
 5. Sign in and choose **New vault**.
 6. Select your phrase length, paste or type the words, add the optional PIN and passphrase.

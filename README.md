@@ -97,7 +97,7 @@ See [SECURITY.md](SECURITY.md) for the full threat model and the known residual 
 - Self-registration, then a TOTP authenticator (RFC 6238) — no passwords at all.
 - Authenticator secrets are encrypted at rest under `APP_KEY`, so a database dump cannot
   generate valid codes.
-- 10 single-use backup codes, shown once, stored only as hashes.
+- Eight single-use backup codes, shown once, stored only as hashes.
 - Self-hosted CAPTCHA: no external calls, and the answer is never present as text in the
   markup. Falls back to an SVG pixel grid when GD is unavailable.
 - Pairing a new authenticator **signs out every other live session**, and there is an
@@ -187,7 +187,17 @@ Not needed: `mbstring`, `curl`, `intl`, Composer, Node, any build step.
 
 ## Install
 
-Full walkthrough in **[INSTALL.md](INSTALL.md)**. The short version:
+**New to this?** Start with **[GETTING-STARTED.md](GETTING-STARTED.md)** — a step-by-step
+guide written for someone who has never set up a web server, with separate paths for cPanel
+shared hosting (no command line), a VPS, and just trying it on your own Windows, macOS or
+Linux machine. It opens with the four things that can permanently lose your coins, which is
+worth reading before you install anything.
+
+Hit an unfamiliar term anywhere in this project? **[GLOSSARY.md](GLOSSARY.md)** defines all
+of them in plain language.
+
+**[INSTALL.md](INSTALL.md)** is the concise reference for people who already know the stack.
+The short version:
 
 ```bash
 git clone https://github.com/bitcoin-minion/coldvault.git
