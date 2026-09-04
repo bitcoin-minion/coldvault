@@ -528,6 +528,17 @@ raising it is always safe, and existing vaults keep the count stored on their ow
 
 ## 14. Running it locally — with or without HTTPS
 
+> **This section is only about your own machine.** A normal hosted install needs nothing
+> from it. "HTTPS is mandatory" means the app *requires* SSL — so a server that has a
+> certificate is the intended case and works with no extra configuration and `LOCAL_MODE`
+> left empty. Deploy the files, point the vhost at `public/`, and you are done; steps 1–11
+> above are the whole process.
+>
+> The app accepts any signal a real host provides: `HTTPS=on`, `HTTPS=1`, `SERVER_PORT`
+> 443, or `X-Forwarded-Proto: https` when TLS is terminated by a proxy, load balancer or
+> CDN in front of it. `LOCAL_MODE` exists only for `localhost`, where obtaining a
+> certificate is awkward — **never** as a way to run a public instance without one.
+
 HTTPS is enforced on any reachable host, but you have two ways to run it on your own
 machine. **Option B is the better one if you plan to change any code.**
 
@@ -555,6 +566,35 @@ the built-in server will not route them. Use the query-string forms instead:
 **Never set `LOCAL_MODE` on a host anyone else can reach.** Over cleartext HTTP the
 keyword — which *is* the encryption key — is readable by anyone on the network path, and
 with it the recovery phrase.
+
+#### `localhost` means loopback only — and that is a feature here
+
+`php -S localhost:8080` binds **127.0.0.1 and nothing else**. Only the machine running it
+can connect. From another device on your network — `http://10.10.5.23:8080`, say — you get
+connection refused. Confirm it yourself:
+
+```bash
+ss -ltnp | grep 8080
+```
+
+You will see `127.0.0.1:8080`, not `0.0.0.0:8080`.
+
+**Do not "fix" that with `php -S 0.0.0.0:8080` while `LOCAL_MODE` is on.** That combination
+serves the vault in cleartext across your whole network: every keyword typed crosses the
+LAN readable, the session cookie loses its `Secure` flag, and anyone sharing that network —
+or its Wi-Fi — can take both. `LOCAL_MODE` is keyed off the flag, not the hostname; the app
+cannot tell `localhost` from a LAN address, so nothing will stop you.
+
+**To reach it from other devices on your network, use Option B instead.** `mkcert` accepts
+an IP or a hostname, so you get real TLS over the LAN:
+
+```bash
+mkcert 10.10.5.23 coldvault.lan
+```
+
+Serve that with Apache or nginx bound to the address, leave `LOCAL_MODE` empty, and install
+the mkcert root CA on each device that will connect — `mkcert -CAROOT` shows where it lives.
+Those devices then trust the certificate with no warning page.
 
 ### Option B — real HTTPS locally, with `LOCAL_MODE` off
 

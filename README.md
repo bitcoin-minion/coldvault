@@ -179,7 +179,7 @@ has to survive into a second request.
 | Optional | `gd` with FreeType — enables the raster CAPTCHA. Without it the SVG fallback is used automatically. |
 | **Web server** | Apache 2.4 with `mod_rewrite` and `mod_headers`, and `AllowOverride All` for the document root. |
 | **Database** | MySQL 8.0+ or MariaDB 10.4+. |
-| **HTTPS** | Required on any reachable host — the app refuses to serve over plain HTTP, because the keyword *is* the encryption key. **You do not need a certificate to try it locally:** see below. |
+| **HTTPS** | Required on any reachable host — the app refuses to serve over plain HTTP, because the keyword *is* the encryption key. A host that already has a certificate needs **no extra configuration**; it also accepts `X-Forwarded-Proto: https` behind a proxy or CDN. **You do not need a certificate to try it locally:** see below. |
 
 Not needed: `mbstring`, `curl`, `intl`, Composer, Node, any build step.
 
@@ -232,6 +232,12 @@ cd public && php -S localhost:8080
 Then open `http://localhost:8080/`. PHP's built-in server does not read `.htaccess`, so
 use the query-string routes instead of the clean URLs: `?screen=register`, `?screen=help`,
 `?screen=redeem`, `?screen=security`.
+
+That binds **loopback only** — other devices on your network cannot reach it, which is
+intended. Do not widen it to `0.0.0.0` while `LOCAL_MODE` is on: that serves the vault in
+cleartext across the LAN, where the keyword is readable in transit. To reach it from other
+devices, give that machine a real certificate instead — `mkcert` accepts a LAN IP or
+hostname.
 
 **`LOCAL_MODE` is for `localhost` only.** Never set it on a host anyone else can reach —
 it turns off the single protection standing between your keyword and the network.
