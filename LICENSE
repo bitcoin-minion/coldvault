@@ -19,32 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
--------------------------------------------------------------------------------
-THIRD-PARTY COMPONENTS
-
-This repository bundles the following, each under its own terms:
-
-  public/qrcode.js
-      QR Code Generator for JavaScript — Copyright (c) 2009 Kazuhiko Arase.
-      MIT License. See the notice at the top of the file.
-      "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.
-
-  public/words.js
-      The 2,048-word English wordlist from BIP39
-      (https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt).
-      Used only to generate suggested passphrases and to recognise
-      machine-generated phrases. Coldvault never generates a recovery seed.
-
-  public/fonts/ibm-plex-mono-*.woff2
-  public/fonts/ibm-plex-sans-*.woff2
-      IBM Plex Sans and IBM Plex Mono — Copyright (c) 2017 IBM Corp., with
-      Reserved Font Name "Plex". Licensed under the SIL Open Font License,
-      Version 1.1. Full text in public/fonts/LICENSE-IBM-Plex.txt.
-      Bundled (latin and latin-ext subsets) rather than loaded from a font
-      host, so the application makes no third-party request.
-
-  public/fonts/DejaVuSans-Bold.ttf
-      DejaVu Fonts, released under the DejaVu Fonts License (a permissive
-      Bitstream Vera derivative). Full text in public/fonts/LICENSE-DejaVu.txt.
-      Used only to draw the CAPTCHA when GD and FreeType are available.

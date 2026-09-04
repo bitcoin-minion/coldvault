@@ -1,0 +1,70 @@
+Coldvault
+Copyright (c) 2026 Bitcoin Minion
+
+This product includes software and font files developed by third parties.
+Coldvault itself is MIT-licensed — see LICENSE. The components below are
+redistributed under their own terms, which are reproduced in the files named
+against each one.
+
+===============================================================================
+public/qrcode.js
+===============================================================================
+
+QR Code Generator for JavaScript
+Copyright (c) 2009 Kazuhiko Arase — http://www.d-project.com/
+
+Licensed under the MIT License. The full notice is retained at the top of the
+file itself and is not reproduced here.
+
+"QR Code" is a registered trademark of DENSO WAVE INCORPORATED
+(http://www.denso-wave.com/qrcode/faqpatent-e.html).
+
+Used to render the setup QR code for an authenticator app, in the browser. No
+QR data ever leaves the page.
+
+===============================================================================
+public/words.js
+===============================================================================
+
+The 2,048-word English wordlist from BIP39
+https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt
+
+Used for two things only: generating suggested passphrases when you press
+"Generate", and recognising machine-generated phrases when scoring keyword
+strength.
+
+Coldvault never generates a recovery seed. You bring your own.
+
+The same list is embedded in tools/kwcheck.php so that the offline keyword
+auditor has no dependencies.
+
+===============================================================================
+public/fonts/ibm-plex-mono-*.woff2
+public/fonts/ibm-plex-sans-*.woff2
+===============================================================================
+
+IBM Plex Sans and IBM Plex Mono
+Copyright (c) 2017 IBM Corp., with Reserved Font Name "Plex"
+https://github.com/IBM/plex
+
+Licensed under the SIL Open Font License, Version 1.1.
+Full licence text: public/fonts/LICENSE-IBM-Plex.txt
+
+Bundled (latin and latin-ext subsets only) rather than loaded from a font host,
+so that the application makes no third-party request and no outside party
+learns a visitor's address from a page load.
+
+===============================================================================
+public/fonts/DejaVuSans-Bold.ttf
+===============================================================================
+
+DejaVu Fonts
+Fonts are (c) Bitstream. DejaVu changes are in the public domain. Glyphs
+imported from the Arev fonts are (c) Tavmjong Bah.
+
+Released under the DejaVu Fonts License, a permissive Bitstream Vera derivative.
+Full licence text: public/fonts/LICENSE-DejaVu.txt
+
+Used only to draw the CAPTCHA image when PHP's GD extension and FreeType are
+available. Without it the application falls back to an SVG pixel grid, so this
+file is optional.

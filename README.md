@@ -366,7 +366,8 @@ issue.
 
 MIT — see [LICENSE](LICENSE).
 
-Bundled third-party components, each under its own terms:
+Bundled third-party components are listed with their terms in
+[NOTICE](NOTICE). In summary:
 
 - **`public/qrcode.js`** — QR Code Generator for JavaScript, © 2009 Kazuhiko Arase, MIT.
   "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.
