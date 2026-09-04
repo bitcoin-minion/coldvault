@@ -444,8 +444,6 @@ function auth_shell($tagline, $inner, $qrScript = null) {
        . '<meta name="robots" content="noindex, nofollow">'
        . '<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">'
        . '<title>Coldvault</title>' . '<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzBhMGMwZCIvPjxnIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzVmZTNjMyIgc3Ryb2tlLXdpZHRoPSIxLjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCI+PHJlY3QgeD0iNC41IiB5PSIxMC41IiB3aWR0aD0iMTUiIGhlaWdodD0iOS41IiByeD0iMiIvPjxwYXRoIGQ9Ik04IDEwLjVWN2E0IDQgMCAwIDEgOCAwdjMuNSIvPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTUuNSIgcj0iMS4zIiBmaWxsPSIjNWZlM2MzIiBzdHJva2U9Im5vbmUiLz48L2c+PC9zdmc+">'
-       . '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-       . '<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">'
        . '<link rel="stylesheet" href="'.APP_BASE.'style.css"></head><body><div class="wrap">'
        . '<div class="top"><div class="brand"><div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.6" stroke-linecap="round"><rect x="4" y="10.5" width="16" height="10" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/><circle cx="12" cy="15.5" r="1.4"/></svg></div>'
        . '<div><h1>Cold<span class="b">vault</span><span class="cursor"></span></h1><div class="tagline">'.h($tagline).'</div></div></div></div>'
@@ -598,8 +596,6 @@ function render_help() {
        . '<meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">'
        . '<title>Coldvault &mdash; Help &amp; security</title>'
        . '<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,'.$ico.'">'
-       . '<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>'
-       . '<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">'
        . '<link rel="stylesheet" href="'.$B.'style.css"></head><body><div class="wrap helpwrap">'
        . '<div class="top"><div class="brand"><div class="mark"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.6" stroke-linecap="round"><rect x="4" y="10.5" width="16" height="10" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/><circle cx="12" cy="15.5" r="1.4"/></svg></div>'
        . '<div><h1>Cold<span class="b">vault</span></h1><div class="tagline">help &amp; security</div></div></div>'
@@ -1455,9 +1451,6 @@ elseif ($action === 'invite_cancel') {
 <meta name="robots" content="noindex, nofollow">
 <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate, max-age=0">
 <title>Coldvault</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;500;600;700&family=IBM+Plex+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="style.css">
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAyNCAyNCI+PHJlY3Qgd2lkdGg9IjI0IiBoZWlnaHQ9IjI0IiByeD0iNSIgZmlsbD0iIzBhMGMwZCIvPjxnIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzVmZTNjMyIgc3Ryb2tlLXdpZHRoPSIxLjkiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCI+PHJlY3QgeD0iNC41IiB5PSIxMC41IiB3aWR0aD0iMTUiIGhlaWdodD0iOS41IiByeD0iMiIvPjxwYXRoIGQ9Ik04IDEwLjVWN2E0IDQgMCAwIDEgOCAwdjMuNSIvPjxjaXJjbGUgY3g9IjEyIiBjeT0iMTUuNSIgcj0iMS4zIiBmaWxsPSIjNWZlM2MzIiBzdHJva2U9Im5vbmUiLz48L2c+PC9zdmc+">
 </head>

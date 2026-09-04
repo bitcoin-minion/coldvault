@@ -188,6 +188,21 @@ The application records **no client IP**. There is no `REMOTE_ADDR` read, no add
 column, and no per-visitor counter anywhere in the code. The sign-up throttle stores
 timestamps only.
 
+**No third-party requests, either.** Every asset is served from your own origin: the fonts
+are bundled as woff2 under `public/fonts/`, the CAPTCHA is generated locally, the QR code
+is drawn in the browser, and the favicon is an inline data URI. Nothing is fetched from a
+CDN, an analytics service or a font host, so no outside party learns a visitor's address
+merely from a page load. The Content-Security-Policy reflects this — `default-src 'self'`
+with no external origin whitelisted anywhere in it. Earlier revisions loaded IBM Plex from
+Google Fonts; that was removed for exactly this reason.
+
+You can confirm it yourself — this should print nothing:
+
+```bash
+grep -roE 'https?://[a-zA-Z0-9./_+-]+' public/*.php public/*.css \
+  | grep -vE 'w3\.org/2000/svg|localhost'
+```
+
 **What the application cannot fix:** your web server logs every request with the client
 address *before PHP runs*. If the privacy stance matters to you, turn that off in the
 vhost — [INSTALL.md step 9](INSTALL.md#9-turn-off-ip-logging-optional-but-recommended)
@@ -209,49 +224,40 @@ Ranked by how much they should worry you.
    developer tools were open, the fetch response is visible in the network tab. A malicious
    browser extension with page access can read them. Unlock on a machine you trust.
 
-3. **A third-party webfont is requested on every page.** The pages load IBM Plex from
-   Google Fonts, which tells a third party the visitor's IP address and the fact that they
-   loaded this page. For a tool built on not recording addresses, that is a real wart.
-   To remove it, self-host the fonts (IBM Plex is OFL-licensed): download the woff2 files
-   into `public/fonts/`, add `@font-face` rules to `public/style.css`, delete the three
-   `<link>` blocks in `public/index.php` (near lines 447, 601 and 1458), and drop
-   `https://fonts.googleapis.com` and `https://fonts.gstatic.com` from the `style-src` and
-   `font-src` directives in `public/config.php`.
-
-4. **Losing `APP_KEY` locks everyone out permanently.** Covered above. It is a real
+3. **Losing `APP_KEY` locks everyone out permanently.** Covered above. It is a real
    operational risk, and the most likely way to lose access to a working instance. Back the
    file up off the machine.
 
-5. **Username enumeration through registration.** The sign-up form must tell you a name is
+4. **Username enumeration through registration.** The sign-up form must tell you a name is
    taken, so a public sign-up page inherently confirms which names exist. Inherent to the
    feature, left in place. The sign-in path leaks nothing — an unknown username is gated
    identically to a known one.
 
-6. **The entropy estimator is an UPPER bound for human-invented keywords.** `Fluffy2019`
+5. **The entropy estimator is an UPPER bound for human-invented keywords.** `Fluffy2019`
    measures 60 bits and is refused only because it happens to fall under 65 — not because
    the estimator understood it. A password-shaped keyword may be far weaker than its score
    suggests. Use `tools/kwcheck.php --explain` for the methodology, and prefer **Generate**
    over inventing one.
 
-7. **The sign-up throttle is site-wide.** `REG_MAX_PER_HOUR` counts registrations across
+6. **The sign-up throttle is site-wide.** `REG_MAX_PER_HOUR` counts registrations across
    the whole instance, because no per-address counter exists. So a sign-up flood can block
    new registrations for an hour. Accepted trade for storing nothing identifying; close the
    registration page once your accounts exist.
 
-8. **A guest cannot rotate their own keyword.** The keyword-change path runs through the
+7. **A guest cannot rotate their own keyword.** The keyword-change path runs through the
    owner-only save function. Workaround: the owner removes and re-invites them — which
    rotates the data key and therefore invalidates every other keyslot too.
 
-9. **Clash-checking cost grows with vault count.** When a keyword is *set*, the app derives
+8. **Clash-checking cost grows with vault count.** When a keyword is *set*, the app derives
    once per existing vault to warn you that the same keyword already opens another one.
    Fine for a handful of vaults; noticeably slow at hundreds. Plain unlocking never pays
    this.
 
-10. **Duplicate keywords are allowed, only flagged.** Two of your vaults may share a
+9. **Duplicate keywords are allowed, only flagged.** Two of your vaults may share a
     keyword; you get a note saying so. It was previously a hard refusal, which was worse —
     unlocking stopped at the first match, silently orphaning the second vault.
 
-11. **No third-party audit.** Nobody outside this project has reviewed the cryptography or
+10. **No third-party audit.** Nobody outside this project has reviewed the cryptography or
     the authorization model. The code is small and deliberately readable. Read it before
     you trust it with anything that matters.
 

@@ -34,8 +34,8 @@ header('X-Frame-Options: DENY');
 // ============================================================================
 define('CSP_NONCE', base64_encode(random_bytes(16)));
 header("Content-Security-Policy: default-src 'self'; script-src 'self' 'nonce-" . CSP_NONCE . "'; "
-     . "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
-     . "font-src 'self' https://fonts.gstatic.com; img-src 'self' data:; object-src 'none'; "
+     . "style-src 'self' 'unsafe-inline'; "
+     . "font-src 'self'; img-src 'self' data:; object-src 'none'; "
      . "base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
 
 // Never render errors to the page — they can leak values. Log nothing sensitive.

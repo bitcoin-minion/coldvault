@@ -20,7 +20,7 @@ Budget about 20 minutes. Nothing here needs Composer, Node, or a build step.
 11. [First run: create your account and your first vault](#11-first-run-create-your-account-and-your-first-vault)
 12. [Backups](#12-backups)
 13. [Troubleshooting](#13-troubleshooting)
-14. [Developing locally over plain HTTP](#14-developing-locally-over-plain-http)
+14. [Running it locally — with or without HTTPS](#14-running-it-locally--with-or-without-https)
 
 ---
 
@@ -362,7 +362,18 @@ curl -sI https://vault.example.com/ | grep -iE 'content-security-policy|strict-t
 
 # Plain HTTP redirects rather than serving
 curl -sI http://vault.example.com/ | head -1
+
+# The bundled fonts are being served (expect 200 and font/woff2)
+curl -sI https://vault.example.com/fonts/ibm-plex-sans-latin.woff2 | grep -iE '^HTTP|content-type'
+
+# No page requests anything off your own origin (expect no output)
+curl -s https://vault.example.com/help/ | grep -oE 'https?://[a-zA-Z0-9./_+-]+' | grep -v 'w3.org/2000/svg'
 ```
+
+That last check is worth keeping in mind if you modify the templates. The app
+deliberately fetches nothing from a CDN or a font host, and the
+Content-Security-Policy (`default-src 'self'`, no external origin) enforces it — so
+adding an outside asset will fail silently in the browser until you widen the policy.
 
 `env.php` returning 404 is worth a word: it *is* inside `public/`, so it is reachable —
 but it produces no output and defines no route, so Apache serves an empty 200 or PHP exits
@@ -515,21 +526,21 @@ raising it is always safe, and existing vaults keep the count stored on their ow
 
 ---
 
-## 14. Developing locally over plain HTTP
+## 14. Running it locally — with or without HTTPS
 
-For local work only, set this in `coldvault.env`:
+HTTPS is enforced on any reachable host, but you have two ways to run it on your own
+machine. **Option B is the better one if you plan to change any code.**
+
+### Option A — no certificate: `LOCAL_MODE`
+
+Set this in `coldvault.env`:
 
 ```ini
 LOCAL_MODE=1
 ```
 
 That relaxes the HTTPS requirement and drops the `Secure` flag from the session cookie, so
-`http://localhost` works.
-
-**Never set it on a host anyone else can reach.** Over cleartext HTTP the keyword — which
-*is* the encryption key — is readable by anyone on the network path.
-
-A minimal local setup with PHP's built-in server, no Apache:
+`http://localhost` works. Nothing else to install:
 
 ```bash
 cd /var/www/coldvault/public
@@ -541,19 +552,77 @@ the built-in server will not route them. Use the query-string forms instead:
 `http://localhost:8080/?screen=register`, `?screen=help`, `?screen=redeem`,
 `?screen=security`.
 
-### Or: real HTTPS locally, and leave LOCAL_MODE off
+**Never set `LOCAL_MODE` on a host anyone else can reach.** Over cleartext HTTP the
+keyword — which *is* the encryption key — is readable by anyone on the network path, and
+with it the recovery phrase.
 
-If you would rather develop against the same code path production uses,
-[`mkcert`](https://github.com/FiloSottile/mkcert) issues a certificate your own browser
-trusts, with no warnings and no public DNS:
+### Option B — real HTTPS locally, with `LOCAL_MODE` off
+
+You do **not** need a public domain or a Let's Encrypt certificate to run HTTPS on your
+own machine. [`mkcert`](https://github.com/FiloSottile/mkcert) creates a private
+certificate authority, installs it into your OS and browser trust stores, and issues certs
+your browser accepts with **no warning page**:
 
 ```bash
+# Debian/Ubuntu: apt install mkcert   ·   macOS: brew install mkcert
 mkcert -install
 mkcert coldvault.localhost
 ```
 
-Point an Apache vhost at the two files it writes, use
-`ServerName coldvault.localhost`, and leave `LOCAL_MODE` empty. This is the better option
-if you are touching anything to do with sessions, cookies or the HTTPS gate itself —
-`LOCAL_MODE` changes the `Secure` cookie flag, so a bug that only appears with it *on* is
-a bug you will never see in production, and vice versa.
+That writes `coldvault.localhost.pem` and `coldvault.localhost-key.pem` into the current
+directory. Move them somewhere sensible and point a vhost at them:
+
+```apache
+<VirtualHost *:443>
+    ServerName coldvault.localhost
+    DocumentRoot /var/www/coldvault/public
+
+    SSLEngine on
+    SSLCertificateFile    /etc/ssl/local/coldvault.localhost.pem
+    SSLCertificateKeyFile /etc/ssl/local/coldvault.localhost-key.pem
+
+    <Directory /var/www/coldvault/public>
+        AllowOverride All
+        Require all granted
+        Options -Indexes
+    </Directory>
+</VirtualHost>
+```
+
+Add the hostname to your hosts file, leave `LOCAL_MODE` empty, and reload Apache:
+
+```bash
+echo "127.0.0.1 coldvault.localhost" | sudo tee -a /etc/hosts
+sudo systemctl reload apache2
+```
+
+Then open `https://coldvault.localhost/`. Clean URLs work, the `Secure` cookie flag is
+set, and the HTTPS gate is satisfied — the same code path production runs.
+
+### Why Option B is better if you are changing code
+
+**PHP's built-in server cannot do TLS at all.** `php -S` has no HTTPS support, so
+Option A is the *only* way to use it — which means `LOCAL_MODE` is the only way to run
+without a real web server.
+
+That matters because `LOCAL_MODE` changes real behaviour: it skips the HTTPS gate in
+`config.php` and clears the `Secure` flag in `auth_session_start()`. A bug that appears
+only with the flag on — or only with it off — is a bug you will never reproduce in the
+other environment. If you are touching sessions, cookies, the CSP, or the HTTPS gate
+itself, use Option B.
+
+### If `mkcert` is unavailable
+
+A plain self-signed certificate also satisfies the app, because the check is on the
+protocol, not on who signed the certificate. Your browser will show an interstitial you
+have to click through every session, which is why `mkcert` is preferred:
+
+```bash
+openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
+  -keyout coldvault.localhost-key.pem -out coldvault.localhost.pem \
+  -subj "/CN=coldvault.localhost" -addext "subjectAltName=DNS:coldvault.localhost"
+```
+
+**Behind a TLS-terminating proxy instead?** `config.php` also accepts
+`X-Forwarded-Proto: https`, so a local Caddy, Traefik or nginx in front of `php -S` works
+with `LOCAL_MODE` off — provided the proxy actually sets that header.

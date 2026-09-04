@@ -36,7 +36,15 @@ This repository bundles the following, each under its own terms:
       Used only to generate suggested passphrases and to recognise
       machine-generated phrases. Coldvault never generates a recovery seed.
 
+  public/fonts/ibm-plex-mono-*.woff2
+  public/fonts/ibm-plex-sans-*.woff2
+      IBM Plex Sans and IBM Plex Mono — Copyright (c) 2017 IBM Corp., with
+      Reserved Font Name "Plex". Licensed under the SIL Open Font License,
+      Version 1.1. Full text in public/fonts/LICENSE-IBM-Plex.txt.
+      Bundled (latin and latin-ext subsets) rather than loaded from a font
+      host, so the application makes no third-party request.
+
   public/fonts/DejaVuSans-Bold.ttf
       DejaVu Fonts, released under the DejaVu Fonts License (a permissive
-      Bitstream Vera derivative). Full text in public/fonts/LICENSE.
+      Bitstream Vera derivative). Full text in public/fonts/LICENSE-DejaVu.txt.
       Used only to draw the CAPTCHA when GD and FreeType are available.

@@ -123,8 +123,11 @@ See [SECURITY.md](SECURITY.md) for the full threat model and the known residual 
 **Privacy**
 - **No client IP is recorded anywhere in the application.** No `REMOTE_ADDR`, no address
   column, no access counter tied to a visitor.
-- `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex`, no caching, no analytics, no
-  outbound calls except one webfont (see [SECURITY.md](SECURITY.md) to remove it).
+- **No third-party requests at all.** Fonts are bundled, the CAPTCHA is generated locally,
+  the QR code is drawn in the browser, the favicon is inline. Nothing is fetched from a
+  CDN, an analytics service or a font host, so no outside party learns a visitor's address
+  from a page load. The CSP is `default-src 'self'` with no external origin whitelisted.
+- `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex`, no caching, no analytics.
 - Your web server still logs the client IP before PHP runs. Turning that off is the
   operator's job, and it is covered in [INSTALL.md](INSTALL.md).
 
@@ -231,9 +234,15 @@ use the query-string routes instead of the clean URLs: `?screen=register`, `?scr
 `?screen=redeem`, `?screen=security`.
 
 **`LOCAL_MODE` is for `localhost` only.** Never set it on a host anyone else can reach —
-it turns off the single protection standing between your keyword and the network. If you
-want real HTTPS on your development machine, [`mkcert`](https://github.com/FiloSottile/mkcert)
-issues a locally-trusted certificate in one command and you can leave `LOCAL_MODE` off.
+it turns off the single protection standing between your keyword and the network.
+
+You can also run **real HTTPS locally** and leave `LOCAL_MODE` off:
+[`mkcert`](https://github.com/FiloSottile/mkcert) issues a certificate your own browser
+trusts, with no warning page and no public domain. That is the better option if you plan
+to change any code, because `LOCAL_MODE` alters real behaviour — it skips the HTTPS gate
+and clears the `Secure` cookie flag, so some bugs only reproduce with it off. Note that
+`php -S` has **no TLS support at all**, so local HTTPS means Apache or nginx.
+[INSTALL.md §14](INSTALL.md#14-running-it-locally--with-or-without-https) has both routes.
 
 ---
 
@@ -272,7 +281,7 @@ coldvault/
 │   ├── crypto.php             pure crypto helpers. No I/O.
 │   ├── captcha.php            self-hosted CAPTCHA (GD, or SVG fallback)
 │   ├── style.css  qrcode.js  words.js  .htaccess
-│   └── fonts/
+│   └── fonts/                 bundled IBM Plex woff2 + the CAPTCHA face
 ├── schema/coldvault.sql     structure only — no data, no users, no keys
 ├── tools/genkey.php         generate an APP_KEY
 ├── tools/kwcheck.php        offline keyword auditor (`--selftest`, `--explain`)
@@ -349,5 +358,10 @@ Bundled third-party components, each under its own terms:
   [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt) wordlist. Used
   to suggest passphrases and to recognise machine-generated phrases. **Coldvault never
   generates a recovery seed** — you bring your own.
+- **`public/fonts/ibm-plex-*.woff2`** — [IBM Plex](https://github.com/IBM/plex) Sans and
+  Mono, © 2017 IBM Corp., under the SIL Open Font License 1.1 (see
+  `public/fonts/LICENSE-IBM-Plex.txt`). Bundled rather than loaded from Google Fonts, so
+  the app makes no third-party request. latin and latin-ext subsets only.
 - **`public/fonts/DejaVuSans-Bold.ttf`** — DejaVu Fonts, under the DejaVu Fonts License
-  (see `public/fonts/LICENSE`). Used only to draw the CAPTCHA when GD is available.
+  (see `public/fonts/LICENSE-DejaVu.txt`). Used only to draw the CAPTCHA when GD is
+  available.
