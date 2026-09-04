@@ -1,0 +1,559 @@
+# Installing Coldvault
+
+A complete walkthrough on a fresh Linux server: PHP, Apache, MySQL/MariaDB, HTTPS,
+the database structure, and the `APP_KEY`.
+
+Budget about 20 minutes. Nothing here needs Composer, Node, or a build step.
+
+**Contents**
+
+1. [Install the packages](#1-install-the-packages)
+2. [Get the code](#2-get-the-code)
+3. [Create the database](#3-create-the-database)
+4. [Import the structure](#4-import-the-structure)
+5. [Generate an APP_KEY and write the configuration](#5-generate-an-app_key-and-write-the-configuration)
+6. [File ownership and permissions](#6-file-ownership-and-permissions)
+7. [Configure Apache](#7-configure-apache)
+8. [Get an HTTPS certificate](#8-get-an-https-certificate)
+9. [Turn off IP logging (optional but recommended)](#9-turn-off-ip-logging-optional-but-recommended)
+10. [Verify the install](#10-verify-the-install)
+11. [First run: create your account and your first vault](#11-first-run-create-your-account-and-your-first-vault)
+12. [Backups](#12-backups)
+13. [Troubleshooting](#13-troubleshooting)
+14. [Developing locally over plain HTTP](#14-developing-locally-over-plain-http)
+
+---
+
+## 1. Install the packages
+
+### Debian 12 / Ubuntu 22.04+
+
+```bash
+sudo apt update
+sudo apt install -y apache2 libapache2-mod-php mariadb-server \
+                    php php-mysql php-gd certbot python3-certbot-apache
+sudo a2enmod rewrite headers ssl
+sudo systemctl enable --now apache2 mariadb
+```
+
+### RHEL 9 / AlmaLinux 9 / Rocky 9
+
+```bash
+sudo dnf install -y httpd mod_ssl mariadb-server \
+                    php php-mysqlnd php-gd certbot python3-certbot-apache
+sudo systemctl enable --now httpd mariadb php-fpm
+```
+
+`mod_rewrite` and `mod_headers` are built into the base `httpd` package on RHEL-family
+systems; no `a2enmod` equivalent is needed.
+
+### What each piece is for
+
+| Package | Why |
+|---|---|
+| `php` | 8.1 or newer. `openssl` and `json` are compiled in. |
+| `php-mysql` / `php-mysqlnd` | The `mysqli` driver. Required. |
+| `php-gd` | **Optional.** Enables the raster CAPTCHA. Without it, an SVG fallback is used automatically — the app does not care either way. |
+| `mod_rewrite` | Clean URLs (`/register/`, `/help/`, `/redeem/`, `/security/`). |
+| `mod_headers` | The static security headers in `public/.htaccess`. |
+| `certbot` | A free HTTPS certificate. HTTPS is **not optional** here. |
+
+Confirm the version and the extensions:
+
+```bash
+php -v && php -m | grep -E '^(openssl|mysqli|json|gd)$'
+```
+
+You need `openssl`, `mysqli` and `json`. `gd` is a bonus.
+
+---
+
+## 2. Get the code
+
+```bash
+sudo mkdir -p /var/www
+sudo git clone https://github.com/bitcoin-minion/coldvault.git /var/www/coldvault
+cd /var/www/coldvault
+```
+
+The document root will be `/var/www/coldvault/public`. The configuration file lives one
+level up, at `/var/www/coldvault/coldvault.env`, where the web server cannot serve it even
+if a rewrite rule is misconfigured. **Keep that arrangement.**
+
+---
+
+## 3. Create the database
+
+Secure the server first if this is a fresh install:
+
+```bash
+sudo mysql_secure_installation
+```
+
+Then create a database and a user whose rights reach **nothing else**:
+
+```bash
+sudo mysql
+```
+
+```sql
+CREATE DATABASE coldvault CHARACTER SET utf8mb4;
+CREATE USER 'coldvault'@'localhost' IDENTIFIED BY 'PUT-A-LONG-RANDOM-PASSWORD-HERE';
+GRANT ALL PRIVILEGES ON coldvault.* TO 'coldvault'@'localhost';
+FLUSH PRIVILEGES;
+EXIT;
+```
+
+Generate that password rather than inventing one:
+
+```bash
+openssl rand -base64 30
+```
+
+**Why a dedicated user matters.** Coldvault's rows are ciphertext, so these credentials
+leaking is survivable. Credentials that *also* open your other databases are not. Grant
+this user access to one database and nothing more.
+
+Confirm the confinement actually holds — the second command must fail:
+
+```bash
+mysql -u coldvault -p -e "SHOW TABLES;" coldvault
+mysql -u coldvault -p -e "SHOW DATABASES;" | grep -v -E 'Database|information_schema|coldvault'
+```
+
+---
+
+## 4. Import the structure
+
+```bash
+mysql -u coldvault -p coldvault < /var/www/coldvault/schema/coldvault.sql
+```
+
+Six tables, structure only — no data, no users, no keys:
+
+```bash
+mysql -u coldvault -p coldvault -e "SHOW TABLES;"
+```
+
+```
+vault
+vault_backup_codes
+vault_invite
+vault_keyslot
+vault_reg_throttle
+vault_users
+```
+
+The file gives no `COLLATE` clause, so each table takes your server's default utf8mb4
+collation. That is what keeps it portable between MySQL 8 and MariaDB. Nothing in the app
+depends on collation: every secret column is `varbinary`.
+
+---
+
+## 5. Generate an APP_KEY and write the configuration
+
+```bash
+cd /var/www/coldvault
+sudo cp coldvault.env.example coldvault.env
+php tools/genkey.php
+```
+
+`genkey.php` prints one line. Paste it into `coldvault.env`, then fill in the database
+settings:
+
+```bash
+sudo nano coldvault.env
+```
+
+```ini
+APP_KEY=<the base64 string genkey.php printed>
+
+DB_HOST=localhost
+DB_PORT=
+DB_NAME=coldvault
+DB_USER=coldvault
+DB_PASS=<the password from step 3>
+
+OTP_ISSUER=Coldvault
+LOCAL_MODE=
+```
+
+### Back APP_KEY up now, before you create an account
+
+`APP_KEY` encrypts the stored authenticator secrets and hashes the backup codes and invite
+codes.
+
+- **Lose it and every account is locked out permanently.** The vault ciphertext survives
+  intact — but no authenticator code and no backup code can be verified, so nothing can
+  sign in to reach it.
+- **Changing it on a live instance has exactly the same effect.** Generate it once.
+- It does **not** encrypt recovery phrases. Those are encrypted under each vault's own
+  keyword, which is never stored. So `APP_KEY` plus a full database dump still reveals no
+  phrase.
+
+Copy `coldvault.env` somewhere off this machine — a password manager entry, an encrypted
+USB stick, paper in a safe. Do it before step 11.
+
+---
+
+## 6. File ownership and permissions
+
+Find out which user PHP runs as:
+
+```bash
+ps -o user= -C apache2 | sort -u ; ps -o user= -C httpd | sort -u ; ps -o user= -C php-fpm | sort -u
+```
+
+Usually `www-data` (Debian/Ubuntu) or `apache` (RHEL family). Substitute below.
+
+```bash
+cd /var/www/coldvault
+sudo chown -R root:www-data .
+sudo find . -type d -exec chmod 755 {} \;
+sudo find . -type f -exec chmod 644 {} \;
+
+# The configuration file: readable by PHP, writable by nobody, invisible to other users.
+sudo chown root:www-data coldvault.env
+sudo chmod 640 coldvault.env
+```
+
+`640` with `root` as owner is better than `600` owned by the web user: PHP can read the
+file but cannot rewrite it, and no other local account can read it at all.
+
+Verify:
+
+```bash
+sudo -u www-data test -r /var/www/coldvault/coldvault.env && echo "PHP can read it" || echo "PHP CANNOT read it"
+```
+
+---
+
+## 7. Configure Apache
+
+### Debian / Ubuntu
+
+```bash
+sudo nano /etc/apache2/sites-available/coldvault.conf
+```
+
+### RHEL family
+
+```bash
+sudo nano /etc/httpd/conf.d/coldvault.conf
+```
+
+Either way, the vhost — replace `vault.example.com` throughout:
+
+```apache
+<VirtualHost *:80>
+    ServerName vault.example.com
+    Redirect permanent / https://vault.example.com/
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName vault.example.com
+    DocumentRoot /var/www/coldvault/public
+
+    SSLEngine on
+    SSLCertificateFile    /etc/letsencrypt/live/vault.example.com/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/vault.example.com/privkey.pem
+
+    <Directory /var/www/coldvault/public>
+        # REQUIRED — without it .htaccess is ignored and the clean URLs 404.
+        AllowOverride All
+        Require all granted
+        Options -Indexes
+    </Directory>
+
+    ErrorLog  /var/log/apache2/coldvault-error.log
+    CustomLog /var/log/apache2/coldvault-access.log combined
+</VirtualHost>
+```
+
+On RHEL family, the log paths are `/var/log/httpd/` instead.
+
+**`DocumentRoot` must point at `public/`, never at the repository root.** Pointing it one
+level up would put `coldvault.env` inside the served tree.
+
+Enable and reload:
+
+```bash
+sudo a2ensite coldvault && sudo apachectl configtest && sudo systemctl reload apache2
+```
+
+```bash
+sudo apachectl configtest && sudo systemctl reload httpd
+```
+
+---
+
+## 8. Get an HTTPS certificate
+
+The app **refuses to serve over plain HTTP**. The keyword is the encryption key; over
+cleartext anyone on the network path reads it, and with it the recovery phrase. This is
+enforced in `public/config.php`, not merely suggested.
+
+```bash
+sudo certbot --apache -d vault.example.com
+```
+
+Certbot installs the certificate and sets up renewal. Check renewal works:
+
+```bash
+sudo certbot renew --dry-run
+```
+
+**Behind a reverse proxy or load balancer that terminates TLS?** Make sure it forwards
+`X-Forwarded-Proto: https`, which `config.php` checks. Without it you get a redirect loop.
+
+---
+
+## 9. Turn off IP logging (optional but recommended)
+
+The application records **no client IP anywhere** — no `REMOTE_ADDR`, no address column,
+no per-visitor counter. But your web server logs every request with the client address
+*before PHP ever runs*, so the application cannot do anything about it.
+
+If you want the privacy stance to be real, change it in the vhost. Either drop the access
+log entirely:
+
+```apache
+CustomLog /dev/null combined
+```
+
+Or keep the log and omit the address:
+
+```apache
+LogFormat "- - - [%t] \"%r\" %>s %b" cv_noip
+CustomLog /var/log/apache2/coldvault-access.log cv_noip
+```
+
+Then reload Apache. Also check for anything that resurrects the data: log rotation
+archives, a hosting panel's traffic statistics, a CDN or proxy in front, and fail2ban.
+
+Note the error log can still contain paths and occasional request detail. Keep it, but
+know it exists.
+
+---
+
+## 10. Verify the install
+
+```bash
+curl -sI https://vault.example.com/ | head -1
+```
+
+Expect `HTTP/1.1 200`. Then walk the checks:
+
+```bash
+# Clean URLs work -> AllowOverride All is in effect
+curl -sI https://vault.example.com/register/ | head -1
+curl -sI https://vault.example.com/help/     | head -1
+
+# The configuration file is NOT reachable over the web (expect 404 on all three)
+curl -sI https://vault.example.com/coldvault.env      | head -1
+curl -sI https://vault.example.com/../coldvault.env   | head -1
+curl -sI https://vault.example.com/env.php            | head -1
+
+# PHP is executing, not being served as text (expect no "<?php" in the output)
+curl -s https://vault.example.com/ | grep -c '<?php'
+
+# The security headers are present
+curl -sI https://vault.example.com/ | grep -iE 'content-security-policy|strict-transport|x-frame|permissions-policy|referrer'
+
+# Plain HTTP redirects rather than serving
+curl -sI http://vault.example.com/ | head -1
+```
+
+`env.php` returning 404 is worth a word: it *is* inside `public/`, so it is reachable —
+but it produces no output and defines no route, so Apache serves an empty 200 or PHP exits
+silently. What matters is that `coldvault.env` itself, one directory up, is unreachable.
+The two curls above confirm it.
+
+---
+
+## 11. First run: create your account and your first vault
+
+1. Open `https://vault.example.com/register/`.
+2. Pick a username (3–32 characters: letters, digits, `_`, `.`, `-`) and solve the CAPTCHA.
+3. Scan the QR code with any TOTP authenticator, then enter the 6-digit code it shows.
+4. **Save the 10 backup codes.** They are shown once and stored only as hashes. Without
+   them, a lost phone means a lost account.
+5. Sign in and choose **New vault**.
+6. Select your phrase length, paste or type the words, add the optional PIN and passphrase.
+7. Choose a **keyword** that clears the 65-bit floor. Hit **Generate** for a random 7-word
+   passphrase, or audit your own idea first, on a different machine:
+
+   ```bash
+   php tools/kwcheck.php
+   ```
+
+   It reads the keyword from the terminal with echo off, refuses to take it as a command
+   line argument, writes nothing to disk and makes no network calls.
+
+8. **Write the keyword down and store it somewhere safe.** It is never stored on the
+   server, is not recoverable, and without it the vault cannot be decrypted by anyone —
+   including you.
+
+### Close the door behind you
+
+Registration is open by default. Once your accounts exist, either keep the sign-up page
+behind something or accept that strangers can create accounts (they can never reach your
+vaults — a vault requires a keyslot). To close it entirely, add this to the vhost:
+
+```apache
+<Location "/register/">
+    Require ip 203.0.113.0/24
+</Location>
+```
+
+---
+
+## 12. Backups
+
+Two separate things, and they must be stored separately.
+
+**1. `coldvault.env`** — off the server, before you create an account. See step 5. This is
+the one that cannot be regenerated.
+
+**2. The database:**
+
+```bash
+mysqldump -u coldvault -p --single-transaction coldvault > coldvault-$(date +%F).sql
+```
+
+The dump is ciphertext, hashes and encrypted labels. On its own it reveals no phrase and
+no keyword — not even with `APP_KEY`, because phrases are encrypted under the vault
+keyword, which is stored nowhere. Still encrypt the dump at rest: it tells an observer how
+many accounts and vaults exist, and it is the thing an attacker would grind keywords
+against offline.
+
+**Restoring** takes both: the dump, and the *same* `APP_KEY` the data was written under.
+
+---
+
+## 13. Troubleshooting
+
+### `Vault temporarily unavailable.` (HTTP 503)
+
+Every startup failure gives this one vague answer on purpose — it never reveals whether
+the configuration file, the key, the database user or the host is at fault. Check in this
+order:
+
+```bash
+# 1. Can PHP read the configuration file?
+sudo -u www-data test -r /var/www/coldvault/coldvault.env && echo ok || echo "unreadable"
+
+# 2. Does APP_KEY decode to exactly 32 bytes?
+php -r '$l=trim(shell_exec("grep -m1 \"^APP_KEY=\" /var/www/coldvault/coldvault.env"));
+        $v=substr($l,8); $d=base64_decode($v,true);
+        echo ($d===false ? "not valid base64" : strlen($d)." bytes")."\n";'
+
+# 3. Do the database credentials work?
+mysql -u coldvault -p coldvault -e "SELECT COUNT(*) FROM vault_users;"
+```
+
+Step 2 must print exactly `32 bytes`. The app refuses to start on anything else,
+deliberately: a wrong key would otherwise fail silently and write authenticator secrets
+the real key could never read again.
+
+### `/register/` returns 404, but `/` works
+
+`.htaccess` is being ignored. `AllowOverride All` is missing from the `<Directory>` block,
+or `mod_rewrite` is not enabled.
+
+```bash
+apache2ctl -M | grep -E 'rewrite|headers'
+```
+
+### Redirect loop
+
+TLS is terminated upstream and `X-Forwarded-Proto: https` is not reaching PHP. Fix it at
+the proxy. Do **not** work around it by enabling `LOCAL_MODE`.
+
+### `HTTPS required.` on form submission
+
+The POST arrived over plain HTTP. Check the form is being served from the `https://` URL
+and that no upstream is downgrading it.
+
+### The page loads but nothing is clickable, buttons do nothing
+
+The Content-Security-Policy nonce is not matching. Almost always one of:
+
+- A second CSP header set in `.htaccess`, the vhost, or a proxy. **Two CSP headers are
+  both enforced**, and the intersection blocks the app's own scripts. Remove yours; the
+  policy belongs in `config.php`.
+- Output buffering or a rewrite that alters the HTML after PHP emits it.
+
+Check you have exactly one:
+
+```bash
+curl -sI https://vault.example.com/ | grep -ci content-security-policy
+```
+
+That must print `1`.
+
+### The CAPTCHA image is blank or broken
+
+```bash
+curl -sI https://vault.example.com/captcha.php | grep -i content-type
+```
+
+Expect `image/png` (GD present) or `image/svg+xml` (fallback). If neither, the session
+directory is probably not writable by the PHP user.
+
+### Unlocking says "JavaScript is required to open a vault."
+
+Working as designed. The phrase is fetched over an authenticated request and written into
+the page by script, so it never exists inside an HTML document — that is what keeps it out
+of history entries and resubmittable POSTs. There is deliberately no non-JS fallback.
+
+### A vault takes ~1 second to unlock
+
+Also working as designed. That is 450,000 PBKDF2 iterations. An attacker pays the same
+price on every guess. Lower `VAULT_ITER` only if you understand what you are giving up;
+raising it is always safe, and existing vaults keep the count stored on their own row.
+
+---
+
+## 14. Developing locally over plain HTTP
+
+For local work only, set this in `coldvault.env`:
+
+```ini
+LOCAL_MODE=1
+```
+
+That relaxes the HTTPS requirement and drops the `Secure` flag from the session cookie, so
+`http://localhost` works.
+
+**Never set it on a host anyone else can reach.** Over cleartext HTTP the keyword — which
+*is* the encryption key — is readable by anyone on the network path.
+
+A minimal local setup with PHP's built-in server, no Apache:
+
+```bash
+cd /var/www/coldvault/public
+php -S localhost:8080
+```
+
+The clean URLs (`/register/`, `/help/`, `/redeem/`, `/security/`) come from `.htaccess`, so
+the built-in server will not route them. Use the query-string forms instead:
+`http://localhost:8080/?screen=register`, `?screen=help`, `?screen=redeem`,
+`?screen=security`.
+
+### Or: real HTTPS locally, and leave LOCAL_MODE off
+
+If you would rather develop against the same code path production uses,
+[`mkcert`](https://github.com/FiloSottile/mkcert) issues a certificate your own browser
+trusts, with no warnings and no public DNS:
+
+```bash
+mkcert -install
+mkcert coldvault.localhost
+```
+
+Point an Apache vhost at the two files it writes, use
+`ServerName coldvault.localhost`, and leave `LOCAL_MODE` empty. This is the better option
+if you are touching anything to do with sessions, cookies or the HTTPS gate itself —
+`LOCAL_MODE` changes the `Secure` cookie flag, so a bug that only appears with it *on* is
+a bug you will never see in production, and vice versa.

@@ -1,0 +1,34 @@
+# The configuration file. Holds APP_KEY and the database password.
+# NEVER commit this. Ship coldvault.env.example instead.
+coldvault.env
+*.env
+!*.env.example
+
+# Anything that could hold a secret, a keyword or a phrase.
+*.sql.gz
+*.dump
+dump.sql
+backup*.sql
+
+# Logs. PHP error output can contain query fragments and file paths.
+error_log
+*.log
+logs/
+
+# Editor and OS noise.
+*.bak
+*.bak-*
+*.orig
+*.rej
+*~
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# PHP tooling, if you add any later.
+/vendor/
+composer.lock
+.phpunit.result.cache

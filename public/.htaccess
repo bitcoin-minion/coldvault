@@ -1,0 +1,50 @@
+# public/.htaccess
+# 2026-09-04: Coldvault public release (MIT).
+#   Forces HTTPS, disables caching, sets the static security headers and the
+#   clean URLs. Requires mod_rewrite and mod_headers, and AllowOverride All
+#   (or paste this into your vhost instead).
+#
+#   Access to a vault is gated in PHP by the TOTP authenticator (auth.php);
+#   there is deliberately no HTTP basic auth in front of it.
+
+RewriteEngine On
+
+RewriteCond %{HTTPS} !=on
+RewriteCond %{HTTP:X-Forwarded-Proto} !=https
+RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+
+# Clean URL — /register/ serves the register screen.
+RewriteRule ^register/?$ index.php?screen=register [L,QSA]
+# Clean URL — /help/ serves the public Help & security page.
+RewriteRule ^help/?$ index.php?screen=help [L,QSA]
+# Clean URL — /redeem/ serves the invite redemption screen.
+RewriteRule ^redeem/?$ index.php?screen=redeem [L,QSA]
+# Clean URL — /security/ serves the account security page (login required in PHP).
+RewriteRule ^security/?$ index.php?screen=security [L,QSA]
+
+DirectoryIndex index.php
+
+# No directory listings.
+Options -Indexes
+
+<IfModule mod_headers.c>
+  Header always set Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
+  Header always set Pragma "no-cache"
+  Header always set Referrer-Policy "no-referrer"
+  Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"
+  # The CSP comes from config.php, NOT from here. script-src carries a
+  # one-time nonce that each inline <script> echoes back, which is what let 'unsafe-inline'
+  # go; mod_headers cannot generate a value and hand it to PHP, so a header set here could
+  # only ever be the weaker policy - and two CSP headers are both enforced, which would
+  # quietly re-admit inline script. Do not re-add it here.
+  # Switch off every browser API this app has never used, so injected script
+  # cannot reach them either. Set here rather than in config.php so it also covers
+  # captcha.php and the static assets - captcha.php loads auth.php but NOT config.php.
+  # DELIBERATELY ABSENT, each keeping its browser default:
+  #   clipboard-read / clipboard-write - the invite page's Copy button needs it
+  #   publickey-credentials-get        - left open so a security key could be added later
+  #   fullscreen                       - no reason to forbid it
+  # browsing-topics and local-fonts are here for privacy, not just security: they opt the
+  # page out of interest-based advertising and of installed-font fingerprinting.
+  Header always set Permissions-Policy "accelerometer=(), ambient-light-sensor=(), autoplay=(), battery=(), browsing-topics=(), camera=(), display-capture=(), encrypted-media=(), gamepad=(), geolocation=(), gyroscope=(), hid=(), idle-detection=(), local-fonts=(), magnetometer=(), microphone=(), midi=(), payment=(), picture-in-picture=(), screen-wake-lock=(), serial=(), usb=(), xr-spatial-tracking=()"
+</IfModule>

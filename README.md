@@ -1,0 +1,353 @@
+# Coldvault
+
+A self-hosted, encrypted vault for recovery phrases — the 12-to-33 word backups your
+wallet gave you, plus the optional PIN and passphrase that go with them.
+
+Each vault is encrypted under a **keyword that is never stored anywhere**. The database
+holds ciphertext and nothing else: a full dump reveals no phrase and no keyword. Accounts
+are gated by a TOTP authenticator, and a vault can be **shared** with other accounts —
+several keywords opening one ciphertext, each revocable — without ever handing over a key
+in plain text.
+
+Plain PHP. No framework, no build step, no package manager, no third-party service —
+six PHP files, a stylesheet and two scripts.
+
+```
+PHP 8.1+   ·   Apache 2.4   ·   MySQL 8 / MariaDB 10.4+   ·   MIT
+```
+
+---
+
+## Disclaimer
+
+> **This software is provided as-is, without warranty of any kind, and has not been
+> independently audited.** Review it yourself, or have it reviewed, before trusting it with
+> anything of value.
+>
+> Coldvault handles material that grants irreversible control over cryptocurrency holdings.
+> A lost keyword, a lost `APP_KEY`, a compromised host, an operator error, or a defect in
+> this code can result in the **permanent and unrecoverable loss of funds**. There is no
+> reset, no recovery process, no support channel, and no party — including the authors —
+> able to restore access on your behalf.
+>
+> You are solely responsible for auditing the source, for the security of the infrastructure
+> you deploy it on, for the strength and custody of the keywords and keys you choose, and
+> for maintaining independent backups of anything you store here.
+>
+> **Use it at your own risk.** If you are not in a position to evaluate the code and the
+> deployment yourself, do not use it to store a recovery phrase protecting assets you cannot
+> afford to lose. Treat it as a supplementary copy, never as your only one.
+>
+> Nothing in this repository constitutes financial, legal, or security advice. See
+> [LICENSE](LICENSE) for the full terms, and [SECURITY.md](SECURITY.md) for the threat model
+> and known residual risks.
+
+---
+
+## Read this before you use it
+
+**This stores your recovery phrase on a server.** That is a real trade, and the honest
+version of it is:
+
+- **The server decrypts.** Your keyword travels to PHP, which derives the key and
+  decrypts the phrase. Anyone who can edit the code, read process memory, or tamper with
+  the running host can capture your keyword and your phrase. Encryption at rest protects
+  you against a **stolen database or a stolen backup** — not against a compromised
+  server.
+- **So: run it yourself, on a host you control.** Every design decision here assumes the
+  operator and the owner are the same person. Trusting somebody else's instance means
+  trusting them with your coins.
+- **It is not a replacement for metal or paper.** It is a second copy that survives a
+  house fire. Nothing more.
+- **It has had no third-party audit.** The code is small and readable on purpose. Read
+  it before you trust it — the whole application is six PHP files.
+
+If you want a design where the server genuinely cannot read your phrase, you want
+client-side decryption or an air-gapped machine — not this, and not any other web app
+that decrypts server-side while claiming otherwise.
+
+See [SECURITY.md](SECURITY.md) for the full threat model and the known residual risks.
+
+---
+
+## What it does
+
+**Vaults**
+- Stores a 12, 15, 18, 20, 21, 24 or 33-word phrase — BIP39 lengths and the 20/33-word
+  Shamir-style shares from SLIP-39 — plus an optional PIN and passphrase.
+- Paste a phrase into the first slot and the grid detects its length and resizes.
+- AES-256-GCM, key derived with PBKDF2-HMAC-SHA256 at 450,000 iterations.
+- The phrase is delivered to the browser over an authenticated fetch and written into the
+  page by script. It is never present in the HTML document, so it cannot end up in a
+  history entry, a resubmitted POST, or a crash-restore.
+- Auto-locks after 60 seconds. The grid is wiped, not merely hidden.
+
+**Keywords**
+- A keyword must clear an **entropy floor** (65 bits by default) to create a vault, change
+  a keyword, or join a shared one. A shared vault is only as strong as its weakest
+  keyword, so a guest cannot undermine the owner with a soft one.
+- The estimator counts **distinct** word tokens and caps the character-set branch at
+  twice the distinct character count, so repetition cannot inflate a score —
+  `aaa-aaa-aaa-aaa-aaa-aaa` measures 11 bits, not 66.
+- Checked in the browser first, so a rejection never costs you the words you just typed.
+- A **Generate** button offers a random 7-word passphrase from the BIP39 list.
+- `tools/kwcheck.php` audits a keyword offline, on a machine that never touches this app.
+
+**Accounts**
+- Self-registration, then a TOTP authenticator (RFC 6238) — no passwords at all.
+- Authenticator secrets are encrypted at rest under `APP_KEY`, so a database dump cannot
+  generate valid codes.
+- 10 single-use backup codes, shown once, stored only as hashes.
+- Self-hosted CAPTCHA: no external calls, and the answer is never present as text in the
+  markup. Falls back to an SVG pixel grid when GD is unavailable.
+- Pairing a new authenticator **signs out every other live session**, and there is an
+  explicit "sign out everywhere else" control.
+- A correct code always signs you in. There is deliberately no lockout on the sign-in
+  path — a cap on attempts caps the real owner too, so anyone who knew a username could
+  hold that account shut. A CAPTCHA gate keyed to server-side failure count does the
+  rate-limiting instead.
+
+**Sharing**
+- The owner issues a **one-time invite code** (~120 bits, 72-hour default TTL). Only its
+  HMAC is stored, so a database leak yields no working invite.
+- The invitee signs into their own account and chooses **their own keyword**.
+- Guests get read access only. Rename, invite, remove and transfer are owner-only, and
+  that is enforced inside the functions that do the work — not just in the request
+  handler.
+- **Removing someone rotates the key.** A retained keyslot row plus the ciphertext still
+  yields the key offline, so removal mints a new data key and re-encrypts. Every other
+  keyslot is invalidated by design, and the confirmation page says so.
+- Ownership can be transferred to someone who already holds a keyslot. Authority moves;
+  the old owner keeps read access and loses everything else.
+
+**Privacy**
+- **No client IP is recorded anywhere in the application.** No `REMOTE_ADDR`, no address
+  column, no access counter tied to a visitor.
+- `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex`, no caching, no analytics, no
+  outbound calls except one webfont (see [SECURITY.md](SECURITY.md) to remove it).
+- Your web server still logs the client IP before PHP runs. Turning that off is the
+  operator's job, and it is covered in [INSTALL.md](INSTALL.md).
+
+---
+
+## How the encryption works
+
+Two formats exist, both readable. New vaults use format 2.
+
+**Format 1 — one keyword, one vault.** `PBKDF2(keyword, salt, iterations)` produces the
+AES-256-GCM key directly.
+
+**Format 2 (envelope) — what makes sharing possible.** A random 32-byte **data key**
+encrypts the payload once. Every authorised person holds that same data key *wrapped*
+under a key derived from their own keyword, with their own salt and iteration count:
+
+```mermaid
+graph LR
+  KA["Owner's keyword"] -->|"PBKDF2 450k"| WA["wrap key A"]
+  KB["Guest's keyword"] -->|"PBKDF2 450k"| WB["wrap key B"]
+  WA -->|unwraps| DEK["data key<br/>(32 random bytes)"]
+  WB -->|unwraps| DEK
+  DEK -->|"AES-256-GCM"| CT["ciphertext<br/>(the phrase)"]
+```
+
+So N keywords open one ciphertext, and a keyword can be added or changed **without
+re-encrypting the phrase**. The 450,000 PBKDF2 iterations live on each keyslot, so
+per-keyword brute-force cost is unchanged by sharing.
+
+Every ciphertext carries authenticated additional data (`coldvault-v1`, `coldvault-v2`,
+`coldvault-kek-v1`), so a blob from one context cannot be replayed into another.
+
+Under format 2 the vault row's `iterations` column is `0` — a deliberate poison value.
+The key-derivation helper refuses `iterations < 1`, so a mislabelled row fails closed
+instead of deriving a key from nothing.
+
+**More than one vault?** Unlocking asks you to pick the vault *first*, then its keyword.
+That means one key derivation regardless of how many vaults you own, and the keyword never
+has to survive into a second request.
+
+---
+
+## Requirements
+
+| | |
+|---|---|
+| **PHP** | 8.1 or newer. 7.4 works but has been end-of-life since November 2022 — do not use it. |
+| PHP extensions | `openssl`, `mysqli`, `json`. All standard. |
+| Optional | `gd` with FreeType — enables the raster CAPTCHA. Without it the SVG fallback is used automatically. |
+| **Web server** | Apache 2.4 with `mod_rewrite` and `mod_headers`, and `AllowOverride All` for the document root. |
+| **Database** | MySQL 8.0+ or MariaDB 10.4+. |
+| **HTTPS** | Required on any reachable host — the app refuses to serve over plain HTTP, because the keyword *is* the encryption key. **You do not need a certificate to try it locally:** see below. |
+
+Not needed: `mbstring`, `curl`, `intl`, Composer, Node, any build step.
+
+---
+
+## Install
+
+Full walkthrough in **[INSTALL.md](INSTALL.md)**. The short version:
+
+```bash
+git clone https://github.com/bitcoin-minion/coldvault.git
+cd coldvault
+
+# 1. Database + a user with rights to nothing else
+mysql -u root -p -e "CREATE DATABASE coldvault CHARACTER SET utf8mb4;"
+mysql -u root -p -e "CREATE USER 'coldvault'@'localhost' IDENTIFIED BY 'a-long-random-password';"
+mysql -u root -p -e "GRANT ALL PRIVILEGES ON coldvault.* TO 'coldvault'@'localhost';"
+mysql -u coldvault -p coldvault < schema/coldvault.sql
+
+# 2. Configuration, outside the document root
+cp coldvault.env.example coldvault.env
+chmod 600 coldvault.env
+php tools/genkey.php          # paste the APP_KEY line into coldvault.env
+$EDITOR coldvault.env         # then fill in DB_USER / DB_PASS
+
+# 3. Point an HTTPS vhost's DocumentRoot at ./public and visit /register/
+```
+
+**Back up `coldvault.env` off the server before you create an account.** Losing `APP_KEY`
+locks every account out permanently — the ciphertext survives, but nothing can sign in to
+reach it. Changing it does the same.
+
+### Trying it locally — no certificate required
+
+HTTPS is enforced for a reason: the keyword is the encryption key, and over cleartext
+anyone on the network path reads it. But you should not have to obtain a certificate just
+to look at the thing. Set one line in `coldvault.env`:
+
+```ini
+LOCAL_MODE=1
+```
+
+That skips the HTTPS check and drops the `Secure` flag from the session cookie, so plain
+`http://localhost` works. No Apache needed either:
+
+```bash
+cd public && php -S localhost:8080
+```
+
+Then open `http://localhost:8080/`. PHP's built-in server does not read `.htaccess`, so
+use the query-string routes instead of the clean URLs: `?screen=register`, `?screen=help`,
+`?screen=redeem`, `?screen=security`.
+
+**`LOCAL_MODE` is for `localhost` only.** Never set it on a host anyone else can reach —
+it turns off the single protection standing between your keyword and the network. If you
+want real HTTPS on your development machine, [`mkcert`](https://github.com/FiloSottile/mkcert)
+issues a locally-trusted certificate in one command and you can leave `LOCAL_MODE` off.
+
+---
+
+## Configuration
+
+Secrets live in `coldvault.env`, outside the document root — see
+[`coldvault.env.example`](coldvault.env.example) for every key. Set `COLDVAULT_ENV` in the
+environment if you keep the file elsewhere.
+
+Behavioural tunables are constants at the top of `public/config.php` and
+`public/auth.php`:
+
+| Constant | Default | Meaning |
+|---|---|---|
+| `VAULT_ITER` | `450000` | PBKDF2 iterations for new and re-saved vaults. Existing vaults keep their own count, so raising this is always safe. |
+| `MIN_KEYSLOT_BITS` | `65` | Entropy floor for any keyword that opens a vault. |
+| `INVITE_TTL_HOURS` | `72` | Invite lifetime. It is a full key to the vault while it lives. |
+| `INVITE_MAX_FAILS` | `10` | Wrong attempts before an invite burns out. |
+| `SEED_LENGTHS` | `12,15,18,20,21,24,33` | Accepted phrase lengths. |
+| `AUTH_IDLE` | `900` | Session idle timeout, in seconds. |
+| `AUTH_CAPTCHA_AFTER` | `3` | Failed sign-ins before the human check is demanded. |
+| `REG_MAX_PER_HOUR` | `5` | Sign-ups per hour, **site-wide** — there is no per-address counter, because no address is recorded. |
+| `VAULT_AUTO_UPGRADE` | `true` | Migrate format-1 vaults to the envelope scheme on next unlock, inside a transaction that rolls back on any failure. |
+
+---
+
+## Layout
+
+```
+coldvault/
+├── public/                  ← DocumentRoot points HERE
+│   ├── index.php              the application: routing, handlers, all screens
+│   ├── config.php             headers, CSP nonce, HTTPS gate, tunables, database
+│   ├── env.php                reads coldvault.env — no output, no database
+│   ├── auth.php               TOTP, sessions, backup codes, registration, CSRF
+│   ├── crypto.php             pure crypto helpers. No I/O.
+│   ├── captcha.php            self-hosted CAPTCHA (GD, or SVG fallback)
+│   ├── style.css  qrcode.js  words.js  .htaccess
+│   └── fonts/
+├── schema/coldvault.sql     structure only — no data, no users, no keys
+├── tools/genkey.php         generate an APP_KEY
+├── tools/kwcheck.php        offline keyword auditor (`--selftest`, `--explain`)
+├── coldvault.env.example    configuration template
+├── INSTALL.md  SECURITY.md  LICENSE
+└── coldvault.env            YOU create this. Never committed.
+```
+
+---
+
+## Working on the code
+
+**The keyword strength estimator exists in four places and they must agree:**
+
+| Copy | Where |
+|---|---|
+| `cv_entropy()` | `public/index.php` — server-side enforcement |
+| `cvEntropy()` | the page script in `public/index.php` |
+| `rEnt()` | the redeem screen script in `public/index.php` |
+| `cv_entropy()` | `tools/kwcheck.php` — the offline auditor |
+
+Plus a fifth value, the floor itself: `MIN_KEYSLOT_BITS` in `config.php`, mirrored as
+`CV_MIN` in the page script and `CV_MIN_BITS` in `kwcheck.php`.
+
+After touching any of them, run:
+
+```bash
+php tools/kwcheck.php --selftest
+```
+
+It asserts numeric parity against fixed vectors **and** the accept/refuse boundary. It is
+the only thing standing between you and a client that accepts what the server refuses.
+
+Two traps worth knowing about if you extend the estimator:
+
+- Do **not** add a distinct-character cap to the word branch. A generated keyword made of
+  short words (`ace-bad-cab-ebb-fad-dab-fed-52#`) would then be falsely refused.
+- JavaScript `{}` maps are unsafe for deduplicating tokens — `u["constructor"]` is truthy
+  from the prototype. The mirrors use an array plus `indexOf` for exactly this reason.
+
+**Content-Security-Policy.** `script-src` carries a per-request nonce and does not allow
+`'unsafe-inline'`. Two consequences:
+
+- Every inline `<script>` must echo `CSP_NONCE`. One that forgets is refused by the
+  browser — which is the point: it breaks visibly instead of quietly re-admitting inline
+  script.
+- **A nonce cannot whitelist an `onclick=` attribute.** There are no handler attributes in
+  this codebase; every one is a `data-cv="<action>"` attribute driven by a single delegated
+  listener with an explicit allow-list. Add new actions to that list, not to the markup.
+- The policy is set in `config.php`, **not** in `.htaccess`. Never add a second one there:
+  two CSP headers are both enforced, and a static one could only be the weaker policy.
+
+---
+
+## Security
+
+Threat model, what each key protects, and the known residual risks:
+**[SECURITY.md](SECURITY.md)**.
+
+Found something? Open a private security advisory on the repository rather than a public
+issue.
+
+---
+
+## License
+
+MIT — see [LICENSE](LICENSE).
+
+Bundled third-party components, each under its own terms:
+
+- **`public/qrcode.js`** — QR Code Generator for JavaScript, © 2009 Kazuhiko Arase, MIT.
+  "QR Code" is a registered trademark of DENSO WAVE INCORPORATED.
+- **`public/words.js`** — the 2,048-word English
+  [BIP39](https://github.com/bitcoin/bips/blob/master/bip-0039/english.txt) wordlist. Used
+  to suggest passphrases and to recognise machine-generated phrases. **Coldvault never
+  generates a recovery seed** — you bring your own.
+- **`public/fonts/DejaVuSans-Bold.ttf`** — DejaVu Fonts, under the DejaVu Fonts License
+  (see `public/fonts/LICENSE`). Used only to draw the CAPTCHA when GD is available.
