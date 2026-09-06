@@ -111,14 +111,25 @@ See [SECURITY.md](SECURITY.md) for the full threat model and the known residual 
 - The owner issues a **one-time invite code** (~120 bits, 72-hour default TTL). Only its
   HMAC is stored, so a database leak yields no working invite.
 - The invitee signs into their own account and chooses **their own keyword**.
-- Guests get read access only. Rename, invite, remove and transfer are owner-only, and
-  that is enforced inside the functions that do the work — not just in the request
+- Guests get read access only. Rename, invite, remove, transfer and delete are owner-only,
+  and that is enforced inside the functions that do the work — not just in the request
   handler.
 - **Removing someone rotates the key.** A retained keyslot row plus the ciphertext still
   yields the key offline, so removal mints a new data key and re-encrypts. Every other
   keyslot is invalidated by design, and the confirmation page says so.
 - Ownership can be transferred to someone who already holds a keyslot. Authority moves;
   the old owner keeps read access and loses everything else.
+- **Deleting a vault destroys it, and every key to it.** Owner-only, on its own untimed
+  confirmation page. `vault_keyslot.vault_id` and `vault_invite.vault_id` are both
+  `ON DELETE CASCADE`, so every keyslot — the owner's and every shared person's — and every
+  pending invite go with the row; that is enforced by the schema rather than by application
+  code, so it cannot be forgotten in a later edit. The engine refuses to commit unless
+  exactly one row was removed and no keyslot survived. It asks for an authenticator code and
+  for you to type `DELETE`, but **not** for the vault keyword: deleting performs no
+  cryptography, and requiring the keyword would make a vault whose keyword you had lost
+  permanently undeletable. That is also why the control sits on the keyword screen rather
+  than behind a successful unlock. It cannot be undone, and it cannot un-see anything —
+  anyone who already opened the vault still knows the phrase.
 
 **Privacy**
 - **No client IP is recorded anywhere in the application.** No `REMOTE_ADDR`, no address
@@ -197,7 +208,14 @@ Hit an unfamiliar term anywhere in this project? **[GLOSSARY.md](GLOSSARY.md)** 
 of them in plain language.
 
 **[INSTALL.md](INSTALL.md)** is the concise reference for people who already know the stack.
-The short version:
+
+**Already running Coldvault?** **[UPGRADING.md](UPGRADING.md)** covers moving an existing
+installation to a newer version without setting it up again — your configuration, database
+and stored phrases are never touched by an update. **[CHANGELOG.md](CHANGELOG.md)** records
+what each release changed, including whether it needs a schema or configuration change (most
+do not).
+
+The short version for a fresh install:
 
 ```bash
 git clone https://github.com/bitcoin-minion/coldvault.git

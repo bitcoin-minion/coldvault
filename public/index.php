@@ -294,6 +294,49 @@ function vault_revoke($con, $row, $actorUid, $kw) {
     return null;
 }
 
+// 2026-09-05: Delete a vault outright. Unlike every other privileged action this needs no
+// keyword, because nothing is decrypted or re-encrypted - the row simply goes. That is
+// deliberate: a vault whose keyword has been lost is exactly the one you most want to be
+// able to remove, and demanding the keyword would make it permanently undeletable. The
+// authenticator step-up in the handler is what proves the owner is really the one asking.
+//
+// The database performs the sharing cleanup, not this function: vault_keyslot.vault_id and
+// vault_invite.vault_id are both ON DELETE CASCADE, so every keyslot - the owner's AND
+// every person the vault was shared with - and every pending invite die with the row. That
+// lives in the schema rather than in code here, so it cannot be forgotten in a later edit.
+// The keyslot count is read back before commit to prove the cascade really fired.
+// Returns null on success, or an error string.
+function vault_delete($con, $row, $actorUid) {
+    $vid = (int)$row['id'];
+    // 2026-09-05: SECURITY - the engine enforces ownership itself, not just the handler.
+    //   This destroys a stored seed permanently, so a guest that ever reached it could wipe
+    //   somebody else's backup. Same rule as vault_revoke: guard where the damage happens.
+    if ((int)($row['owner_id'] ?? 0) !== (int)$actorUid) return 'Only the owner of this vault can delete it.';
+
+    $ok = false;
+    mysqli_begin_transaction($con);
+    do {
+        // The owner clause repeats the check above on purpose: every other write in this file
+        // carries one, so a future refactor cannot turn this into delete-any-vault-by-id.
+        $d = mysqli_prepare($con, "DELETE FROM vault WHERE id=? AND user_id=?");
+        if (!$d) break;
+        mysqli_stmt_bind_param($d, 'ii', $vid, $actorUid);
+        if (!mysqli_stmt_execute($d)) break;
+        if (mysqli_stmt_affected_rows($d) !== 1) break;   // 0 rows = not ours; never delete blind
+
+        $g = mysqli_prepare($con, "SELECT COUNT(*) AS c FROM vault_keyslot WHERE vault_id=?");
+        if (!$g) break;
+        mysqli_stmt_bind_param($g, 'i', $vid);
+        if (!mysqli_stmt_execute($g)) break;
+        $gr   = mysqli_stmt_get_result($g);
+        $left = $gr ? (int)(mysqli_fetch_assoc($gr)['c'] ?? -1) : -1;
+        if ($left !== 0) break;      // a surviving keyslot would mean the cascade did not fire
+        $ok = true;
+    } while (false);
+    if (!$ok) { mysqli_rollback($con); return 'Could not delete the vault; nothing was changed.'; }
+    mysqli_commit($con);
+    return null;
+}
 // Write an edited payload back. Returns null on success, or an error string.
 // Under format 2 the payload is re-encrypted with the SAME DEK, so everyone else's
 // keyslot keeps working, and a new keyword re-wraps only the caller's own keyslot.
@@ -1020,6 +1063,52 @@ function render_revoke_form($con, $vid, $targetId, $actorUid, $err = null) {
     auth_shell('remove access', $inner);
 }
 
+// 2026-09-05: deleting a vault gets its own untimed page, for the same reasons revoke and
+//   transfer do - it is irreversible, the consequences have to be read before confirming,
+//   and none of that belongs inside a 60-second self-destruct region.
+function render_delete_form($con, $vid, $actorUid, $err = null) {
+    $me = null;
+    foreach (vault_list_for($con, $actorUid) as $v) if ((int)$v['id'] === (int)$vid) $me = $v;
+    if (!$me) { render_generic_notice('Vault not found', 'That vault does not exist, or you cannot open it.'); return; }
+    $name    = $me['name'] !== '' ? h($me['name']) : 'Vault #'.(int)$vid;
+    $others  = [];
+    foreach (vault_keyslots($con, $vid) as $k) if ((int)$k['user_id'] !== (int)$actorUid) $others[] = $k;
+    $pending = vault_invites_pending($con, $vid);
+
+    $inner = '<h2 class="at">Delete vault</h2>'
+      . '<p class="lead">You are about to <b>permanently delete '.$name.'</b>, created '.h(substr((string)$me['created_at'],0,10)).'.</p>'
+      . sec_banner($err, null)
+      . '<div class="warn" style="margin-top:0"><b>This cannot be undone.</b> The stored phrase is destroyed, not archived. If this vault is the only place those words exist, they are gone for good &mdash; make sure you have another copy before you continue.</div>'
+      . '<div class="factlist" style="margin-top:14px"><div class="lh"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="1.6"><path d="M12 8v5M12 16.5v.5"/><circle cx="12" cy="12" r="9"/></svg> what will happen</div><ul>'
+      . '<li><svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 6 9 17l-5-5"/></svg><span>The encrypted phrase, along with its PIN and passphrase, is <b>deleted outright</b>.</span></li>';
+    if ($others) {
+        $names = [];
+        foreach ($others as $o) $names[] = h($o['label']).' ('.h($o['username'] ?? '?').')';
+        $inner .= '<li><svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M12 8v5M12 16.5v.5"/><circle cx="12" cy="12" r="9"/></svg><span style="color:var(--amber)"><b>'.count($others).' '.(count($others)===1?'person':'people').' this vault is shared with will lose access</b>, with no warning: '.implode(', ', $names).'. Their way in is removed along with the vault itself.</span></li>';
+    } else {
+        $inner .= '<li><svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 6 9 17l-5-5"/></svg><span>Nobody else has access to this vault, so nobody else is affected.</span></li>';
+    }
+    if ($pending) {
+        $inner .= '<li><svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M12 8v5M12 16.5v.5"/><circle cx="12" cy="12" r="9"/></svg><span>'.count($pending).' unused invite '.(count($pending)===1?'code':'codes').' for this vault will stop working.</span></li>';
+    }
+    $inner .= '<li><svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 6 9 17l-5-5"/></svg><span>Your other vaults and your account are untouched.</span></li>'
+      . '</ul></div>';
+    if ($others) {
+        $inner .= '<div class="warn" style="margin-top:14px"><b>Deleting does not un-see anything.</b> Anyone who has already opened this vault knows the phrase, and removing it does not take that back. If that is a concern, move the funds to a new wallet.</div>';
+    }
+    $inner .= '<form method="POST" action="" autocomplete="off" style="margin-top:16px">'
+      . '<input type="hidden" name="action" value="delete_confirm">'
+      . cv_csrf_field()
+      . '<input type="hidden" name="vault_id" value="'.(int)$vid.'">'
+      . '<label class="fl" for="dlc">Type DELETE to confirm</label>'
+      . '<div class="field"><input id="dlc" name="confirm" type="text" placeholder="DELETE" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" autofocus></div>'
+      . '<label class="fl" for="dls">Authenticator code</label>'
+      . '<div class="field"><input id="dls" name="stepup" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code or backup code" autocorrect="off" autocapitalize="characters" spellcheck="false"></div>'
+      . '<div class="hint">Your vault keyword is not needed here, so a vault whose keyword you have lost can still be removed. Nothing on this page is on a timer.</div>'
+      . '<div class="row" style="margin-top:18px"><button class="btn btn-primary" type="submit" data-busytext="Deleting&hellip;"><svg viewBox="0 0 24 24" stroke-width="2"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> Delete this vault permanently</button>'
+      . '<a class="btn btn-ghost" href="'.APP_BASE.'">Cancel</a></div></form>';
+    auth_shell('delete vault', $inner);
+}
 // A plain one-off notice page, for the cases where there is nothing to act on.
 function render_generic_notice($title, $body) {
     auth_shell('notice', '<h2 class="at">'.h($title).'</h2><p class="lead">'.h($body).'</p>'
@@ -1225,6 +1314,32 @@ if ($action === 'revoke_form' || $action === 'revoke_confirm') {
     if ($err2 !== null) { render_revoke_form($con, $vid, $kid, $__uid, $err2); exit; }
     $_SESSION['cv_flash'] = 'Access removed and the vault re-keyed under a new key. Your keyword is unchanged.'
         . ($dropped > 0 ? ' '.$dropped.' other '.($dropped===1?'person needs':'people need').' a fresh invite.' : '');
+    header('Location: ' . APP_BASE); exit;
+}
+// 2026-09-05: delete a vault. Owner only, and gated on the authenticator step-up plus a
+//   typed confirmation rather than the vault keyword - see vault_delete() for why.
+if ($action === 'delete_form' || $action === 'delete_confirm') {
+    $vid = (int)($_POST['vault_id'] ?? 0);
+    $row = null;
+    foreach (vault_rows_for($con, $__uid) as $r) if ((int)$r['id'] === $vid) $row = $r;
+    if (!$row)                            { render_generic_notice('Vault not found', 'That vault does not exist, or you cannot open it.'); exit; }
+    if ((int)$row['owner_id'] !== $__uid) { render_generic_notice('Not allowed', 'Only the owner of this vault can delete it.'); exit; }
+
+    if ($action === 'delete_form') { render_delete_form($con, $vid, $__uid); exit; }
+
+    $typed = strtoupper(trim((string)($_POST['confirm'] ?? '')));
+    if ($typed !== 'DELETE') { render_delete_form($con, $vid, $__uid, 'Type DELETE in the box to confirm.'); exit; }
+    $e = auth_stepup_check($con, $__uid, (string)($_POST['stepup'] ?? ''));
+    if ($e !== '')           { render_delete_form($con, $vid, $__uid, $e); exit; }
+
+    // count who loses access BEFORE the row - and its keyslots - disappear
+    $lost = 0;
+    foreach (vault_keyslots($con, $vid) as $k) if ((int)$k['user_id'] !== $__uid) $lost++;
+
+    $err2 = vault_delete($con, $row, $__uid);
+    if ($err2 !== null) { render_delete_form($con, $vid, $__uid, $err2); exit; }
+    $_SESSION['cv_flash'] = 'Vault deleted permanently. The phrase it held is gone.'
+        . ($lost > 0 ? ' '.$lost.' other '.($lost === 1 ? 'person has' : 'people have').' lost access to it.' : '');
     header('Location: ' . APP_BASE); exit;
 }
 if ($action === 'invite_form') {
@@ -1536,6 +1651,16 @@ elseif ($action === 'invite_cancel') {
         </div>
         <div class="row"><button class="btn btn-primary" type="submit" data-busytext="Decrypting&hellip;"><svg viewBox="0 0 24 24" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg> Decrypt</button></div>
       </form>
+      <?php if((int)$__target['owner_id'] === $__uid): ?>
+      <!-- 2026-09-05: reachable WITHOUT unlocking, deliberately: a vault whose keyword has
+           been lost is exactly the one you most need to remove. Opens its own untimed page. -->
+      <form method="POST" action="" style="margin-top:22px;padding-top:14px;border-top:1px solid var(--line)">
+        <input type="hidden" name="action" value="delete_form">
+        <?php echo cv_csrf_field();?>
+        <input type="hidden" name="vault_id" value="<?php echo (int)$__target['id'];?>">
+        <button class="btn btn-ghost" type="submit" data-busytext="Opening&hellip;" style="padding:9px 14px;font-size:10.5px;letter-spacing:1px;color:var(--danger);border-color:var(--accent-dim)"><svg viewBox="0 0 24 24" stroke-width="2"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> Delete this vault</button>
+      </form>
+      <?php endif; ?>
       <?php endif; ?>
       <?php if($__target !== null):
         $revealedId = (int)$__target['id'];          // everything below already keys off this
