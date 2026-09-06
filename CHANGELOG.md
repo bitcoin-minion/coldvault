@@ -49,6 +49,18 @@ There are no release tags yet, so each entry describes the state of `main` on th
 
 ### Changed
 
+- **No user-visible message names a vault by its numeric id any more.** Vault ids are
+  sequential, so a message like "Vault #333 encrypted and stored" told any signed-in user
+  roughly how many vaults exist on the installation — and comparing two sightings revealed
+  how fast that number was growing. That is metadata about other people's use of your
+  installation, and no user needs it. A vault is now identified by its **name**; one with no
+  name reads "Unnamed vault", and the duplicate-keyword notice says "another of your vaults"
+  instead of naming an id.
+
+  > ⚠️ **This is a partial fix.** The id is still present in hidden form fields, so it
+  > remains discoverable by viewing the page source. Replacing those with opaque references
+  > is a separate change.
+
 - `README.md` documents the new behaviour, and records that rename, invite, remove, transfer
   **and delete** are all owner-only and all enforced in the engine.
 

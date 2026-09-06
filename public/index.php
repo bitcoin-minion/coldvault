@@ -1077,7 +1077,7 @@ function render_delete_form($con, $vid, $actorUid, $err = null) {
     $me = null;
     foreach (vault_list_for($con, $actorUid) as $v) if ((int)$v['id'] === (int)$vid) $me = $v;
     if (!$me) { render_generic_notice('Vault not found', 'That vault does not exist, or you cannot open it.'); return; }
-    $name    = $me['name'] !== '' ? h($me['name']) : 'Vault #'.(int)$vid;
+    $name    = $me['name'] !== '' ? h($me['name']) : 'this unnamed vault';
     $others  = [];
     foreach (vault_keyslots($con, $vid) as $k) if ((int)$k['user_id'] !== (int)$actorUid) $others[] = $k;
     $pending = vault_invites_pending($con, $vid);
@@ -1265,7 +1265,7 @@ if ($action === 'redeem') {
     //   carry a one-shot message across the redirect.
     $__clash = vault_keyword_collision($con, $__uid, $kw, $vid);
     $_SESSION['cv_flash'] = 'You are in. Enter the keyword you just chose to open the vault.'
-        . ($__clash > 0 ? ' Note: that keyword also opens vault #'.$__clash.' - if it were ever exposed, both would be.' : '');
+        . ($__clash > 0 ? ' Note: that keyword also opens another of your vaults - if it were ever exposed, both would be.' : '');
     header('Location: ' . APP_BASE); exit;
 }
 if (($_GET['screen'] ?? '') === 'redeem') { render_redeem(); exit; }
@@ -1423,8 +1423,8 @@ if ($action === 'create') {
             if (mysqli_stmt_execute($stmt)) {
                 $newid = mysqli_insert_id($con);
                 $clash = vault_keyword_collision($con, $__uid, $kw, $newid);
-                $msg = 'Vault #' . $newid . ($vname !== '' ? ' (' . $vname . ')' : '') . ' encrypted and stored.'
-                     . ($clash > 0 ? ' Note: that keyword also opens vault #'.$clash.' - if it were ever exposed, both would be.' : '');
+                $msg = 'Vault ' . ($vname !== '' ? '"' . $vname . '" ' : '') . 'encrypted and stored.'
+                     . ($clash > 0 ? ' Note: that keyword also opens another of your vaults - if it were ever exposed, both would be.' : '');
             }
             else $err = 'Could not store vault.';
         }
@@ -1460,7 +1460,7 @@ elseif ($action === 'unlock') {
             //   A failure here is harmless: the vault stays format 1 and is already revealed.
             if (VAULT_AUTO_UPGRADE && (int)$row['format'] === 1
                 && vault_upgrade_v2($con, $revealedId, $__uid, $kw, $open[0])) {
-                $msg = 'Vault #' . $revealedId . ' upgraded to the shared-capable format.';
+                $msg = 'Vault upgraded to the shared-capable format.';
             }
             break;
         }
@@ -1540,11 +1540,11 @@ elseif ($action === 'update') {
                     if ($un) { mysqli_stmt_bind_param($un, 'sii', $nenc, $vid, $__uid); mysqli_stmt_execute($un); }
                 }
                 $__clash = ($newkw !== '') ? vault_keyword_collision($con, $__uid, $newkw, $vid) : 0;
-                $msg = 'Vault #' . $vid . ' updated.'
+                $msg = 'Vault updated.'
                      . ($newkw !== '' ? ((int)$row['format'] === 2
                         ? ' Your keyword changed (anyone else with access keeps theirs).'
                         : ' Keyword changed.') : '')
-                     . ($__clash > 0 ? ' Note: that keyword also opens vault #'.$__clash.' - if it were ever exposed, both would be.' : '');
+                     . ($__clash > 0 ? ' Note: that keyword also opens another of your vaults - if it were ever exposed, both would be.' : '');
                 $revealed = ['w'=>$words,'pin'=>$pin,'pass'=>$pass]; $revealedId = $vid;
             }
             $payload = '';
@@ -1611,7 +1611,7 @@ elseif ($action === 'invite_cancel') {
         if (count($__vl) === 1)      $__target = $__vl[0];
         elseif ($pickedVault > 0)    { foreach($__vl as $vv) if ((int)$vv['id'] === $pickedVault) $__target = $vv; }
         elseif ($revealedId)         { foreach($__vl as $vv) if ((int)$vv['id'] === (int)$revealedId) $__target = $vv; }
-        $__vname = function($v){ return $v['name'] !== '' ? h($v['name']) : 'Vault #'.(int)$v['id']; };
+        $__vname = function($v){ return $v['name'] !== '' ? h($v['name']) : 'Unnamed vault'; };
       ?>
       <?php if(count($__vl) === 0): ?>
       <p class="lead">Nothing stored yet.</p>
