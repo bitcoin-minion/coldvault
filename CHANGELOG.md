@@ -38,6 +38,15 @@ There are no release tags yet, so each entry describes the state of `main` on th
     that the phrase is destroyed rather than archived — and that deleting cannot un-see
     anything: anyone who has already opened the vault still knows the words.
 
+- **A version marker.** `CV_VERSION` is shown on the **Account security** page as
+  "App version", so you can tell which release an installation is running before deciding
+  whether to update. It is defined in `public/index.php` rather than in `public/config.php`
+  deliberately: most updates replace `index.php` and nothing else, so a constant living in
+  the config file would keep reporting the old version after an update.
+- **[UPGRADING.md](UPGRADING.md)** — how to move an existing installation to a newer version
+  without setting it up again.
+- **This changelog.**
+
 ### Changed
 
 - `README.md` documents the new behaviour, and records that rename, invite, remove, transfer

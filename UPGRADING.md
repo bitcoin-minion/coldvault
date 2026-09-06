@@ -9,6 +9,17 @@ machine with `LOCAL_MODE=1`.
 
 ---
 
+## Which version am I running?
+
+Sign in and open **Account security** from the header. Near the top it shows **App version**
+followed by a date, for example `2026-09-06`. Compare that with the newest entry in
+[CHANGELOG.md](CHANGELOG.md) to see whether there is anything to apply.
+
+> If you see **no version line at all**, you are running the initial release from
+> 2026-09-04 — the marker was added on 2026-09-06.
+
+---
+
 ## The short version for the 2026-09-06 release
 
 **Replace one file: `public/index.php`. That is the whole update.**

@@ -7,6 +7,12 @@ require __DIR__ . '/config.php';   // headers, HTTPS enforcement, $con, VAULT_IT
 require __DIR__ . '/crypto.php';
 require __DIR__ . '/auth.php';     // 2026-09-01: TOTP gate (replaces HTTP Basic auth)
 
+// 2026-09-06: version marker, so an installation can be identified before updating.
+//   Defined HERE rather than in config.php on purpose: most updates replace index.php and
+//   nothing else, so a constant living in config.php would keep reporting the old version
+//   after an update. Bump this whenever a release changes this file.
+define('CV_VERSION', '2026-09-06');
+
 $action   = $_POST['action'] ?? '';
 $msg = null; $err = null; $notice = null; $revealed = null; $revealedId = null; $activeTab = 'unlock';
 $pickedVault = 0;   // 2026-09-03: which vault the two-step chooser is working on
@@ -784,6 +790,7 @@ function render_security($con, $uid, $err = null, $msg = null) {
     $col  = $left <= 2 ? ' style="color:var(--danger)"' : '';
     $inner = '<h2 class="at">Account security</h2>'
       . '<p class="lead">Signed in as <b>'.h(auth_uname()).'</b>. Unused backup codes: <b'.$col.'>'.$left.'</b>.</p>'
+      . '<p class="hint" style="margin-top:-8px">App version <b>'.h(CV_VERSION).'</b></p>'
       . sec_banner($err, $msg)
       . '<details class="hnote"><summary>Lost the phone with your authenticator?</summary><div>Sign in with one of your one-time backup codes, then use <b>Replace authenticator device</b> below to pair a new phone. Finish by generating fresh backup codes. If you have no backup codes left and no authenticator, nobody can reset it from here &mdash; your vaults stay encrypted and safe, but the account cannot be opened.'
       . '<a class="help-more" href="'.APP_BASE.'help/#s10" target="_blank" rel="noopener">Full explanation &rarr;</a></div></details>'
