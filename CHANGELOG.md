@@ -57,9 +57,22 @@ There are no release tags yet, so each entry describes the state of `main` on th
   name reads "Unnamed vault", and the duplicate-keyword notice says "another of your vaults"
   instead of naming an id.
 
-  > ⚠️ **This is a partial fix.** The id is still present in hidden form fields, so it
-  > remains discoverable by viewing the page source. Replacing those with opaque references
-  > is a separate change.
+- **No row id is sent through a form any more, either.** Removing the id from the *messages*
+  was only half the fix — it was still sitting in hidden form fields, so viewing the page
+  source revealed it anyway. Vault, keyslot, invite and user references are now opaque:
+  `HMAC(kind:id, APP_KEY)` truncated to 16 hex characters. Stable for a given row,
+  unguessable without the key, and they say nothing about how many rows exist. `new_owner`
+  mattered most here — it carried a raw **user** id, which leaked how many people use the
+  installation.
+
+  References are translated back to ids in **one place**, immediately after the
+  authentication wall, using the same single-gate reasoning as the CSRF check — so every
+  request handler still reads a plain integer and none of them needed changing.
+
+  This hardens authorization as a side effect: a reference is resolved only against rows the
+  caller already holds, so a request can no longer even *name* another account's vault, and
+  anything unrecognised resolves to 0 and fails closed. Sending a raw integer id is now
+  rejected outright, which also ends id enumeration as a probing technique.
 
 - `README.md` documents the new behaviour, and records that rename, invite, remove, transfer
   **and delete** are all owner-only and all enforced in the engine.

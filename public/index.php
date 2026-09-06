@@ -13,6 +13,26 @@ require __DIR__ . '/auth.php';     // 2026-09-01: TOTP gate (replaces HTTP Basic
 //   after an update. Bump this whenever a release changes this file.
 define('CV_VERSION', '2026-09-06');
 
+// 2026-09-06: opaque references for anything identified by an AUTO_INCREMENT row id.
+//   Vault, keyslot, invite and user ids are sequential, so putting one into a form told
+//   anyone who read the page source roughly how many of that thing exist on the
+//   installation - and comparing two visits showed how fast it was growing. That is
+//   metadata about other people's use, and no user needs it.
+//   A reference is an HMAC of the id under APP_KEY: stable for a given row, unguessable
+//   without the key, and it reveals nothing about how many rows there are.
+//   cv_deref resolves ONLY against a list of ids the caller is already entitled to, so a
+//   reference can never name a row belonging to somebody else. Anything unrecognised
+//   becomes 0 - it fails closed - and every handler's own ownership check still runs.
+function cv_ref($id, $kind) {
+    return ((int)$id > 0) ? substr(hash_hmac('sha256', $kind . ':' . (int)$id, APP_KEY), 0, 16) : '0';
+}
+function cv_deref($token, array $ids, $kind) {
+    $t = (string)$token;
+    if ($t === '' || $t === '0') return 0;
+    foreach ($ids as $id) if (hash_equals(cv_ref($id, $kind), $t)) return (int)$id;
+    return 0;
+}
+
 $action   = $_POST['action'] ?? '';
 $msg = null; $err = null; $notice = null; $revealed = null; $revealedId = null; $activeTab = 'unlock';
 $pickedVault = 0;   // 2026-09-03: which vault the two-step chooser is working on
@@ -924,6 +944,46 @@ if (!auth_is_logged_in($con)) {
 }
 /* ================= authenticated below ================= */
 $__uid = (int)auth_uid();
+
+/* ===== 2026-09-06: opaque references -> row ids. ONE translation for every POST =====
+   The same one-gate reasoning as the CSRF check: doing this in a single place means every
+   handler below still reads a plain integer id and needed no change at all, which keeps this
+   refactor small and auditable. Nothing here widens what a request can reach - each
+   reference is resolved only against rows this account already holds, and an unrecognised
+   one becomes 0, so the handler then reports "not found" exactly as before. */
+if ($action !== '') {
+    if (isset($_POST['vault_id'])) {
+        $_POST['vault_id'] = cv_deref($_POST['vault_id'],
+            array_column(vault_list_for($con, $__uid), 'id'), 'vault');
+    }
+    $__rvid = (int)($_POST['vault_id'] ?? 0);
+
+    // keyslot and new-owner references always arrive with their vault, so scope them to it
+    if (isset($_POST['keyslot_id'])) {
+        $_POST['keyslot_id'] = ($__rvid > 0) ? cv_deref($_POST['keyslot_id'],
+            array_column(vault_keyslots($con, $__rvid), 'id'), 'keyslot') : 0;
+    }
+    if (isset($_POST['new_owner'])) {
+        $_POST['new_owner'] = ($__rvid > 0) ? cv_deref($_POST['new_owner'],
+            array_column(vault_keyslots($con, $__rvid), 'user_id'), 'user') : 0;
+    }
+    // Cancelling an invite carries no vault, and the handler authorises it by created_by,
+    // so resolve against the still-open invites THIS account issued - the same rule.
+    if (isset($_POST['invite_id'])) {
+        $__iids = [];
+        $__ist = mysqli_prepare($con, "SELECT id FROM vault_invite WHERE created_by=? AND used_at IS NULL");
+        if ($__ist) {
+            mysqli_stmt_bind_param($__ist, 'i', $__uid);
+            mysqli_stmt_execute($__ist);
+            $__ires = mysqli_stmt_get_result($__ist);
+            while ($__ires && ($__irow = mysqli_fetch_assoc($__ires))) $__iids[] = (int)$__irow['id'];
+            mysqli_stmt_close($__ist);
+        }
+        $_POST['invite_id'] = cv_deref($_POST['invite_id'], $__iids, 'invite');
+        unset($__iids, $__ist, $__ires, $__irow);
+    }
+    unset($__rvid);
+}
 // 2026-09-03: one-shot message carried across a redirect (e.g. just after redeeming an
 //   invite). Only on a plain page load, so it can never overwrite a handler's own result.
 if ($action === '' && !empty($_SESSION['cv_flash'])) { $msg = $_SESSION['cv_flash']; unset($_SESSION['cv_flash']); }
@@ -996,7 +1056,7 @@ function render_transfer_form($con, $vid, $actorUid, $err = null) {
     $pending = vault_invites_pending($con, $vid);
     $opts = '';
     foreach ($cands as $c)
-        $opts .= '<label class="pickone"><input type="radio" name="new_owner" value="'.(int)$c['user_id'].'"><span><b>'.h($c['label']).'</b> &middot; <span class="m">'.h($c['username'] ?? '?').'</span></span></label>';
+        $opts .= '<label class="pickone"><input type="radio" name="new_owner" value="'.cv_ref($c['user_id'], 'user').'"><span><b>'.h($c['label']).'</b> &middot; <span class="m">'.h($c['username'] ?? '?').'</span></span></label>';
 
     $inner = '<h2 class="at">Transfer ownership</h2>'
       . '<p class="lead">Hand this vault to somebody who already has access. They take over deciding who can open it.</p>'
@@ -1010,7 +1070,7 @@ function render_transfer_form($con, $vid, $actorUid, $err = null) {
       . '<form method="POST" action="" autocomplete="off" style="margin-top:16px">'
       . '<input type="hidden" name="action" value="transfer_confirm">'
       . cv_csrf_field()
-      . '<input type="hidden" name="vault_id" value="'.(int)$vid.'">'
+      . '<input type="hidden" name="vault_id" value="'.cv_ref($vid, 'vault').'">'
       . '<label class="fl">Hand it to</label>' . $opts
       . '<label class="fl" for="tfk" style="margin-top:16px">Your keyword</label>'
       . '<div class="field"><input id="tfk" name="keyword" type="password" placeholder="your current keyword" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false">'
@@ -1057,8 +1117,8 @@ function render_revoke_form($con, $vid, $targetId, $actorUid, $err = null) {
       . '<form method="POST" action="" autocomplete="off" style="margin-top:16px">'
       . '<input type="hidden" name="action" value="revoke_confirm">'
       . cv_csrf_field()
-      . '<input type="hidden" name="vault_id" value="'.(int)$vid.'">'
-      . '<input type="hidden" name="keyslot_id" value="'.(int)$targetId.'">'
+      . '<input type="hidden" name="vault_id" value="'.cv_ref($vid, 'vault').'">'
+      . '<input type="hidden" name="keyslot_id" value="'.cv_ref($targetId, 'keyslot').'">'
       . '<label class="fl" for="rvk">Your keyword</label>'
       . '<div class="field"><input id="rvk" name="keyword" type="password" placeholder="your current keyword" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" autofocus>'
       . '<button type="button" class="eye" data-cv="eye" data-cv-for="rvk" aria-label="show"><svg viewBox="0 0 24 24"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/></svg></button></div>'
@@ -1106,7 +1166,7 @@ function render_delete_form($con, $vid, $actorUid, $err = null) {
     $inner .= '<form method="POST" action="" autocomplete="off" style="margin-top:16px">'
       . '<input type="hidden" name="action" value="delete_confirm">'
       . cv_csrf_field()
-      . '<input type="hidden" name="vault_id" value="'.(int)$vid.'">'
+      . '<input type="hidden" name="vault_id" value="'.cv_ref($vid, 'vault').'">'
       . '<label class="fl" for="dlc">Type DELETE to confirm</label>'
       . '<div class="field"><input id="dlc" name="confirm" type="text" placeholder="DELETE" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false" autofocus></div>'
       . '<label class="fl" for="dls">Authenticator code</label>'
@@ -1134,7 +1194,7 @@ function render_invite_form($vid, $label = '', $err = null) {
       . '<form method="POST" action="" autocomplete="off">'
       . '<input type="hidden" name="action" value="invite_create">'
       . cv_csrf_field()
-      . '<input type="hidden" name="vault_id" value="'.(int)$vid.'">'
+      . '<input type="hidden" name="vault_id" value="'.cv_ref($vid, 'vault').'">'
       . '<label class="fl" for="ivl">Label</label>'
       . '<div class="field"><input id="ivl" name="label" type="text" value="'.h($label).'" placeholder="who is it for, e.g. spouse" maxlength="32" autocomplete="off" spellcheck="false" autofocus></div>'
       . '<label class="fl" for="ivk">Your keyword</label>'
@@ -1624,7 +1684,7 @@ elseif ($action === 'invite_cancel') {
       <form method="POST" action="" style="margin:0 0 9px">
         <input type="hidden" name="action" value="unlock_pick">
         <?php echo cv_csrf_field();?>
-        <input type="hidden" name="vault_id" value="<?php echo (int)$vv['id'];?>">
+        <input type="hidden" name="vault_id" value="<?php echo cv_ref($vv['id'], 'vault');?>">
         <button type="submit" class="vaultpick" data-busytext="Opening&hellip;">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><rect x="4" y="10.5" width="16" height="10" rx="2"/><path d="M8 10.5V7a4 4 0 0 1 8 0v3.5"/><circle cx="12" cy="15.5" r="1.3" fill="currentColor" stroke="none"/></svg>
           <span class="vp-main"><?php echo $__vname($vv);?></span>
@@ -1650,7 +1710,7 @@ elseif ($action === 'invite_cancel') {
       <form method="POST" action="" autocomplete="off" id="unlockForm">
         <input type="hidden" name="action" value="unlock">
         <?php echo cv_csrf_field();?>
-        <input type="hidden" name="vault_id" value="<?php echo (int)$__target['id'];?>">
+        <input type="hidden" name="vault_id" value="<?php echo cv_ref($__target['id'], 'vault');?>">
         <label class="fl" for="uk">Keyword</label>
         <div class="field">
           <input id="uk" name="keyword" type="password" placeholder="••••••••••••••••" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"<?php echo $revealed===null?' autofocus':'';?>>
@@ -1664,7 +1724,7 @@ elseif ($action === 'invite_cancel') {
       <form method="POST" action="" style="margin-top:22px;padding-top:14px;border-top:1px solid var(--line)">
         <input type="hidden" name="action" value="delete_form">
         <?php echo cv_csrf_field();?>
-        <input type="hidden" name="vault_id" value="<?php echo (int)$__target['id'];?>">
+        <input type="hidden" name="vault_id" value="<?php echo cv_ref($__target['id'], 'vault');?>">
         <button class="btn btn-ghost" type="submit" data-busytext="Opening&hellip;" style="padding:9px 14px;font-size:10.5px;letter-spacing:1px;color:var(--danger);border-color:var(--accent-dim)"><svg viewBox="0 0 24 24" stroke-width="2"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></svg> Delete this vault</button>
       </form>
       <?php endif; ?>
@@ -1680,7 +1740,7 @@ elseif ($action === 'invite_cancel') {
       <form method="POST" action="" autocomplete="off" id="editForm">
         <input type="hidden" name="action" value="update">
         <?php echo cv_csrf_field();?>
-        <input type="hidden" name="vault_id" value="<?php echo (int)$revealedId;?>">
+        <input type="hidden" name="vault_id" value="<?php echo cv_ref($revealedId, 'vault');?>">
         <div class="gridhead"><span class="t" id="seedcount">phrase + PIN + passphrase</span>
           <div style="display:flex;gap:8px">
             <button class="clock" type="button" data-cv="cvKeep" id="cvclock" title="Tap to keep it open"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg><span class="tt">1:00</span></button><button class="infobtn" type="button" data-cv="cvHelp" id="cvinfo" aria-label="About the timer" title="What is this?"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5"/><circle cx="12" cy="7.8" r="1" fill="currentColor" stroke="none"/></svg></button><button class="btn btn-ghost" type="button" data-cv="toggleMask" id="maskbtn">Show</button>
@@ -1717,12 +1777,12 @@ elseif ($action === 'invite_cancel') {
           <ul>
             <?php foreach($__ks as $k): ?>
             <li><svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 6 9 17l-5-5"/></svg><span><b><?php echo h($k['label']);?></b> &middot; <span class="m"><?php echo h($k['username'] ?? '?');?></span> &middot; added <?php echo h(substr((string)$k['created_at'],0,10));?><?php if((int)$k['user_id'] === $__ownerId): ?> &middot; <span class="m" style="color:var(--amber)">owner</span><?php endif; ?><?php echo $k['last_used_at']?' &middot; last used '.h(substr((string)$k['last_used_at'],0,10)):'';?><?php if($__isOwner && (int)$k['user_id'] !== $__uid): ?>
-              <form method="POST" action="" style="display:inline;margin-left:8px"><input type="hidden" name="action" value="revoke_form"><?php echo cv_csrf_field();?><input type="hidden" name="vault_id" value="<?php echo (int)$revealedId;?>"><input type="hidden" name="keyslot_id" value="<?php echo (int)$k['id'];?>"><button class="btn btn-ghost" type="submit" data-busytext="Opening&hellip;" style="padding:4px 10px;font-size:9.5px;letter-spacing:1px">Remove</button></form>
+              <form method="POST" action="" style="display:inline;margin-left:8px"><input type="hidden" name="action" value="revoke_form"><?php echo cv_csrf_field();?><input type="hidden" name="vault_id" value="<?php echo cv_ref($revealedId, 'vault');?>"><input type="hidden" name="keyslot_id" value="<?php echo cv_ref($k['id'], 'keyslot');?>"><button class="btn btn-ghost" type="submit" data-busytext="Opening&hellip;" style="padding:4px 10px;font-size:9.5px;letter-spacing:1px">Remove</button></form>
             <?php endif; ?></span></li>
             <?php endforeach; ?>
             <?php foreach($__isOwner ? $__inv : [] as $iv): ?>
             <li><svg viewBox="0 0 24 24" stroke-width="1.8"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3 2"/></svg><span><b><?php echo h($iv['label']);?></b> &middot; invite pending, expires <?php echo h(substr((string)$iv['expires_at'],0,16));?>
-              <form method="POST" action="" style="display:inline;margin-left:8px"><input type="hidden" name="action" value="invite_cancel"><?php echo cv_csrf_field();?><input type="hidden" name="invite_id" value="<?php echo (int)$iv['id'];?>"><button class="btn btn-ghost" type="submit" data-busytext="Cancelling&hellip;" style="padding:4px 10px;font-size:9.5px;letter-spacing:1px">Cancel</button></form>
+              <form method="POST" action="" style="display:inline;margin-left:8px"><input type="hidden" name="action" value="invite_cancel"><?php echo cv_csrf_field();?><input type="hidden" name="invite_id" value="<?php echo cv_ref($iv['id'], 'invite');?>"><button class="btn btn-ghost" type="submit" data-busytext="Cancelling&hellip;" style="padding:4px 10px;font-size:9.5px;letter-spacing:1px">Cancel</button></form>
             </span></li>
             <?php endforeach; ?>
           </ul>
@@ -1733,14 +1793,14 @@ elseif ($action === 'invite_cancel') {
         <form method="POST" action="" style="margin-top:14px">
           <input type="hidden" name="action" value="invite_form">
           <?php echo cv_csrf_field();?>
-          <input type="hidden" name="vault_id" value="<?php echo (int)$revealedId;?>">
+          <input type="hidden" name="vault_id" value="<?php echo cv_ref($revealedId, 'vault');?>">
           <button class="btn btn-ghost" type="submit" data-busytext="Opening&hellip;" style="padding:11px 18px;font-size:11px"><svg viewBox="0 0 24 24" stroke-width="2"><path d="M12 5v14M5 12h14"/></svg> Invite someone to this vault</button>
         </form>
         <?php if(count($__ks) > 1): ?>
         <form method="POST" action="" style="margin-top:8px">
           <input type="hidden" name="action" value="transfer_form">
           <?php echo cv_csrf_field();?>
-          <input type="hidden" name="vault_id" value="<?php echo (int)$revealedId;?>">
+          <input type="hidden" name="vault_id" value="<?php echo cv_ref($revealedId, 'vault');?>">
           <button class="btn btn-ghost" type="submit" data-busytext="Opening&hellip;" style="padding:11px 18px;font-size:11px"><svg viewBox="0 0 24 24" stroke-width="2"><path d="M5 12h14M13 6l6 6-6 6"/></svg> Transfer ownership</button>
         </form>
         <?php endif; ?>
