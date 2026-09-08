@@ -140,8 +140,14 @@ moving the funds is the only real remedy. The UI states this rather than implyin
   There is also an explicit "sign out everywhere else" control.
 - `auth_is_logged_in()` re-reads the account row on every request and fails **closed**: a
   missing row or a version mismatch signs you out.
-- 15-minute idle timeout, `session_regenerate_id(true)` on login, cookie
-  `Secure; HttpOnly; SameSite=Strict`.
+- **Two independent expiries: a 15-minute idle timeout and a 12-hour absolute lifetime**
+  (`AUTH_MAX_SESSION`). An idle timeout alone cannot bound a session that is being kept
+  busy, and a stolen cookie is one being used.
+- `session_regenerate_id(true)` on login, and `session.use_strict_mode` so PHP refuses a
+  session id it did not issue (session fixation).
+- Cookie `Secure; HttpOnly; SameSite=Strict`, **scoped to the install's own path** rather
+  than to `/`. Signing out expires the cookie as well as destroying the server-side record,
+  so a signed-out browser stops presenting a dead session id.
 - TOTP replay is blocked by recording the last accepted step.
 - **No hard lockout on the sign-in path, by design.** Evaluating a code is the only way to
   tell the owner from an attacker, so a hard cap caps the owner too — a 5-strike lockout let

@@ -151,6 +151,36 @@ and not before; a correct keyword is held while the budget is spent and opens th
 the interval elapses; the AJAX path receives `{ok:false, err:…}`; an action carrying no keyword is
 never gated; and exactly 5 of 8 sign-up attempts succeed with no row left behind by a refusal.
 
+### Fixed: session lifetime and cookie handling (no schema or configuration change)
+
+**A session that stayed busy never expired.** The 15-minute idle timeout was the only bound, so a
+cookie kept warm by use lived indefinitely — and a stolen cookie is, by definition, one being used.
+There is now an **absolute lifetime of 12 hours** (`AUTH_MAX_SESSION`) alongside the idle timeout.
+A session already in flight when this deploys carries no birth stamp; it is stamped on its next
+request rather than signed out mid-visit, so it gets one fresh 12 hours and is bounded from then
+on — a deliberate trade against logging every signed-in person out at deployment.
+
+**Signing out left the cookie in the browser.** `auth_logout()` cleared `$_SESSION` and destroyed
+the server-side record but never expired the cookie, so a signed-out browser kept presenting a dead
+session id on every later request. Logout now also sends an expiring `Set-Cookie`, reusing the live
+cookie parameters so the expiry matches the cookie actually set.
+
+**`session.use_strict_mode` is now enabled**, so PHP refuses a session id it did not issue: an
+attacker can no longer plant a known id in someone's browser and wait for it to be authenticated.
+
+**The session cookie is scoped to the install** rather than to `/`, so an install served from a
+subdirectory no longer hands its session cookie to every other app on the same host. The path is
+derived inside `auth.php` instead of read from `APP_BASE`, because `captcha.php` loads `auth.php`
+but never `config.php` — if the two entry points disagreed on the path, the CAPTCHA answer would be
+stored under a cookie the sign-up page never sends back and registration would fail for everyone.
+Both derivations take the same input and produce the same value.
+
+Verified over HTTP against a disposable instance: both entry points issue an identical cookie; a
+registration completes, which is the actual proof that the CAPTCHA answer crosses entry points; a
+planted session id is neither adopted nor given a session file; logout returns a past expiry and
+the browser is signed out; a session backdated past 12 hours is signed out **while not idle**; and
+the idle timeout still fires on its own.
+
 ## 2026-09-06
 
 ### Added

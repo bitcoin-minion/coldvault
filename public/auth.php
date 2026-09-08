@@ -14,6 +14,11 @@
 require_once __DIR__ . '/env.php';
 
 define('AUTH_IDLE',        900);   // session idle timeout (seconds)
+// 2026-09-08 (internal audit): an ABSOLUTE session lifetime, on top of the idle timeout above.
+//   Without one a session that is merely kept warm never expires, so a stolen cookie stayed
+//   good indefinitely - the very thing the keyword-failure budget exists to limit the damage
+//   of. 12 hours is far longer than any real sitting and short enough to bound a theft.
+define('AUTH_MAX_SESSION', 43200);   // 12 hours
 define('AUTH_MAX_FAILS',   5);     // wrong codes before per-user lockout
 define('AUTH_LOCK_SECS',   300);   // lockout duration (step-up path only - see user_fail)
 // 2026-09-03: wrong logins before the sign-in form demands the human check. This is what
@@ -78,7 +83,29 @@ function totp_at($secretRaw,$counter){ $bin="\0\0\0\0".pack('N',$counter);$h=has
 function totp_verify($secretRaw,$code,$t,$window=1){ $code=preg_replace('/\D/','',$code);if(strlen($code)!==6)return false;$step=intdiv($t,30);for($w=-$window;$w<=$window;$w++){if(hash_equals(totp_at($secretRaw,$step+$w),$code))return $step+$w;}return false; }
 
 // ---- session ----
-function auth_session_start(){ if(session_status()===PHP_SESSION_ACTIVE)return;$secure=!(defined('LOCAL_MODE')&&LOCAL_MODE);session_set_cookie_params(['lifetime'=>0,'path'=>'/','secure'=>$secure,'httponly'=>true,'samesite'=>'Strict']);session_name('cvsess');@session_start(); }
+// 2026-09-08 (internal audit): the session cookie's PATH, derived here rather than read from
+//   APP_BASE. captcha.php loads THIS file but never config.php, so APP_BASE may not exist on that
+//   entry point - and if the two paths disagree the CAPTCHA answer is stored under a cookie the
+//   page never sends back. This is the identical derivation config.php uses for APP_BASE, from the
+//   identical input, so both entry points always agree.
+function auth_cookie_path(){
+    if(defined('APP_BASE')) return APP_BASE;
+    $p = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/') . '/';
+    return preg_match('#^/[A-Za-z0-9_./\-]*$#', $p) ? $p : '/';
+}
+function auth_session_start(){
+    if(session_status()===PHP_SESSION_ACTIVE)return;
+    // 2026-09-08 (internal audit): refuse a session id PHP did not issue. Without strict mode an
+    //   attacker could plant a known id in the victim's browser and wait for it to be
+    //   authenticated - session fixation. Must be set BEFORE session_start().
+    @ini_set('session.use_strict_mode','1');
+    $secure=!(defined('LOCAL_MODE')&&LOCAL_MODE);
+    // 2026-09-08: scoped to the app, not the whole domain, so an install served from a
+    //   subdirectory does not hand its session cookie to every other app on the same host.
+    session_set_cookie_params(['lifetime'=>0,'path'=>auth_cookie_path(),'secure'=>$secure,'httponly'=>true,'samesite'=>'Strict']);
+    session_name('cvsess');
+    @session_start();
+}
 // 2026-09-03: a session is now tied to the SECRET VERSION it was issued against, and the
 //   account row must still exist. Pairing a new authenticator bumps that version, so every
 //   OTHER signed-in session ends on its next request. Before this, re-pairing only stopped
@@ -90,13 +117,35 @@ function auth_is_logged_in($con){
     auth_session_start();
     if(empty($_SESSION['cv_uid']))return false;
     if(!empty($_SESSION['cv_last'])&&(time()-$_SESSION['cv_last'])>AUTH_IDLE){auth_logout();return false;}
+    // 2026-09-08 (internal audit): the ABSOLUTE cap, which the idle timeout above cannot give -
+    //   a session kept warm by activity would otherwise live for ever. A session with no stamp
+    //   predates this change, so stamp it now rather than signing that person out mid-visit; it
+    //   is bounded from here on. Deliberate trade: a session already in flight gets a fresh 12h
+    //   once, in exchange for nobody being logged out by the deployment itself.
+    if(empty($_SESSION['cv_started'])) $_SESSION['cv_started']=time();
+    if((time()-(int)$_SESSION['cv_started'])>AUTH_MAX_SESSION){auth_logout();return false;}
     $row=user_by_id($con,(int)$_SESSION['cv_uid']);
     if(!$row||!isset($_SESSION['cv_sver'])||(int)$row['secret_version']!==(int)$_SESSION['cv_sver']){auth_logout();return false;}
     $_SESSION['cv_last']=time();
     return true;
 }
-function auth_login_user($uid,$username,$sver){ auth_session_start();session_regenerate_id(true);$_SESSION['cv_uid']=(int)$uid;$_SESSION['cv_uname']=$username;$_SESSION['cv_sver']=(int)$sver;$_SESSION['cv_last']=time(); }
-function auth_logout(){ auth_session_start();$_SESSION=[];@session_destroy(); }
+function auth_login_user($uid,$username,$sver){ auth_session_start();session_regenerate_id(true);$_SESSION['cv_uid']=(int)$uid;$_SESSION['cv_uname']=$username;$_SESSION['cv_sver']=(int)$sver;$_SESSION['cv_last']=time();$_SESSION['cv_started']=time(); }
+function auth_logout(){
+    auth_session_start();
+    $_SESSION=[];
+    // 2026-09-08 (internal audit): expire the COOKIE as well. Clearing $_SESSION and destroying
+    //   the server-side record left the browser still presenting a dead session id on every later
+    //   request - a logged-out browser kept advertising a session that no longer existed, and any
+    //   copy of that cookie stayed indistinguishable from a live one to anything that only looked
+    //   at the id. Reuse the live parameters so the expiry matches the cookie actually set.
+    if(!headers_sent() && ini_get('session.use_cookies')){
+        $p=session_get_cookie_params();
+        setcookie(session_name(),'',['expires'=>time()-42000,'path'=>$p['path'],'domain'=>$p['domain'],
+                                     'secure'=>$p['secure'],'httponly'=>$p['httponly'],
+                                     'samesite'=>$p['samesite'] ?? 'Strict']);
+    }
+    @session_destroy();
+}
 function auth_uid(){ return $_SESSION['cv_uid'] ?? null; }
 function auth_uname(){ return $_SESSION['cv_uname'] ?? ''; }
 
