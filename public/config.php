@@ -68,7 +68,13 @@ if (!$vault_https && !LOCAL_MODE) {
 
 // Base URL path, so clean links work whether the app is served at / or in a
 // subdirectory. Derived from the executing script, never from user input.
-define('APP_BASE', rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/') . '/');
+// 2026-09-07 (security review): APP_BASE is echoed into many href/src attributes. It derives from
+// SCRIPT_NAME, which is server-set under stock mod_php, but some CGI/FastCGI setups let request
+// path segments leak into it. Restrict it to a safe path charset so it can never carry markup.
+$cv_base = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/') . '/';
+if (!preg_match('#^/[A-Za-z0-9_./\-]*$#', $cv_base)) $cv_base = '/';
+define('APP_BASE', $cv_base);
+unset($cv_base);
 
 // ============================================================================
 // KDF cost. Applies to NEW and re-saved vaults; existing vaults keep the

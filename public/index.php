@@ -656,7 +656,7 @@ function render_register_confirm($username, $secretB32, $err) {
         . cv_csrf_field()
         . '<input class="codebig" name="code" type="tel" inputmode="numeric" autocomplete="one-time-code" placeholder="000000" autofocus>'
         . '<div class="row" style="margin-top:16px"><button class="btn btn-primary" type="submit" data-busytext="Verifying…"><svg viewBox="0 0 24 24" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg> Verify &amp; activate</button></div></form>';
-    $script = 'var qr=qrcode(0,"M");qr.addData('.json_encode($uri).');qr.make();document.getElementById("qrbox").innerHTML=qr.createSvgTag({cellSize:5,margin:1});';
+    $script = 'var qr=qrcode(0,"M");qr.addData('.json_encode($uri, JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT).');qr.make();document.getElementById("qrbox").innerHTML=qr.createSvgTag({cellSize:5,margin:1});';
     auth_shell('for '.h($username), $inner, $script);
 }
 function render_backup_codes($codes, $username) {
@@ -862,7 +862,7 @@ function render_security_rekey($secretB32, $err) {
       . '<input class="codebig" name="code" type="tel" inputmode="numeric" autocomplete="one-time-code" placeholder="000000" autofocus>'
       . '<div class="row" style="margin-top:16px"><button class="btn btn-primary" type="submit"><svg viewBox="0 0 24 24" stroke-width="2"><path d="M20 6 9 17l-5-5"/></svg> Confirm &amp; switch</button>'
       . '<a class="btn btn-ghost" href="'.APP_BASE.'security/">Cancel</a></div></form>';
-    $script = 'var qr=qrcode(0,"M");qr.addData('.json_encode($uri).');qr.make();document.getElementById("qrbox").innerHTML=qr.createSvgTag({cellSize:5,margin:1});';
+    $script = 'var qr=qrcode(0,"M");qr.addData('.json_encode($uri, JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT).');qr.make();document.getElementById("qrbox").innerHTML=qr.createSvgTag({cellSize:5,margin:1});';
     auth_shell('new authenticator', $inner, $script);
 }
 function render_new_backup_codes($codes) {
@@ -1559,6 +1559,12 @@ elseif ($action === 'unlock') {
             $data = json_decode($open[0], true);
             if (!is_array($data) || !isset($data['w'])) continue;
             $revealed = $data; $revealedId = (int)$row['id'];
+            // 2026-09-07 (security review): stamp the keyslot's last_used_at on a successful open so
+            //   the owner has a usage signal (the column existed but was never written). No IP.
+            if ((int)$row['format'] === 2) {
+                $__lu = mysqli_prepare($con, "UPDATE vault_keyslot SET last_used_at=NOW() WHERE vault_id=? AND user_id=?");
+                if ($__lu) { mysqli_stmt_bind_param($__lu, 'ii', $revealedId, $__uid); mysqli_stmt_execute($__lu); }
+            }
             // 2026-09-03: existing keywords predate the floor. Measure in memory and
             //   nudge - never blocking, never stored, never logged.
             $__kwBits = cv_entropy($kw);
@@ -1986,7 +1992,7 @@ elseif ($action === 'invite_cancel') {
   // 2026-09-03: phrase length is selectable - BIP39 uses 12/15/18/21/24, and SLIP-39
   //   Shamir shares are 20 or 33. Slots beyond the chosen length are hidden AND cleared,
   //   so nothing stray is ever submitted.
-  const CV_LENS = <?php echo json_encode(SEED_LENGTHS);?>;
+  const CV_LENS = <?php echo json_encode(SEED_LENGTHS, JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT);?>;
   function cvSetCount(n){
     n = parseInt(n,10) || <?php echo (int)SEED_LENGTH_DEFAULT;?>;
     document.querySelectorAll('#cseed .slot[data-i]').forEach(function(d){
@@ -2142,7 +2148,7 @@ elseif ($action === 'invite_cancel') {
     const modal=document.getElementById('idleModal'); if(!modal) return;
     const WARN_AFTER=13*60*1000, GRACE=60, PING_EVERY=60*1000;
     // 2026-09-03: these three POST without a form, so they carry the token explicitly.
-    const CV_T=<?php echo json_encode(cv_csrf());?>;
+    const CV_T=<?php echo json_encode(cv_csrf(), JSON_HEX_TAG|JSON_HEX_AMP|JSON_HEX_APOS|JSON_HEX_QUOT);?>;
     let last=Date.now(), lastPing=Date.now(), warnOpen=false, grace=GRACE;
     const fmt=s=>Math.floor(Math.max(s,0)/60)+':'+String(Math.max(s,0)%60).padStart(2,'0');
     const leftEl=()=>document.getElementById('idleLeft');

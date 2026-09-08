@@ -14,6 +14,13 @@
 if (defined('CV_ENV_LOADED')) return;
 define('CV_ENV_LOADED', 1);
 
+// 2026-09-07 (security review): suppress error output at the EARLIEST shared include, before this
+// file parses coldvault.env. config.php sets these too, but it runs later and captcha.php never
+// loads it, so on a host defaulting to display_errors=On a warning here (or on the captcha path)
+// could otherwise print the coldvault.env path or other internals to the client.
+ini_set('display_errors', '0');
+error_reporting(0);
+
 // ---------------------------------------------------------------------------
 // The configuration file holds APP_KEY and the database password, so it lives
 // OUTSIDE the document root. Default: one level above public/, i.e. the project

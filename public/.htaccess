@@ -35,6 +35,16 @@ DirectoryIndex index.php
 # No directory listings.
 Options -Indexes
 
+# 2026-09-07 (security review): defence in depth against a mis-set DocumentRoot or a stray copy.
+# The include-only PHP files are never fetched directly (only index.php and captcha.php are entry
+# points), and nothing named *.env or a VCS/dump artefact should ever be served. Deny them.
+<FilesMatch "^(config|env|auth|crypto)\.php$">
+  Require all denied
+</FilesMatch>
+<FilesMatch "\.(env|sql|sql\.gz|dump|bak|orig|log|md)$|^\.">
+  Require all denied
+</FilesMatch>
+
 <IfModule mod_headers.c>
   Header always set Cache-Control "no-store, no-cache, must-revalidate, max-age=0"
   Header always set Pragma "no-cache"

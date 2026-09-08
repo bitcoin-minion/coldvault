@@ -1,0 +1,8 @@
+# 2026-09-07 (security review): defence in depth. The DocumentRoot is meant to be public/ (see
+# INSTALL.md), so this repo root should never be web-served. If an operator points the docroot here
+# by mistake, deny everything rather than expose coldvault.env, schema/, tools/ or .git/.
+Require all denied
+<IfModule !mod_authz_core.c>
+  Order deny,allow
+  Deny from all
+</IfModule>
