@@ -43,8 +43,32 @@ function v_derive($keyword, $salt, $iter) {
 //   caller, which is why it is not in the handlers.
 const VAULT_PT_MAX = 1900;   // varbinary(2048) with room for the GCM tag and future fields
 
+// 2026-09-08 (Pass 8): PAD every payload to one fixed length before encrypting.
+//   AES-GCM adds no padding of its own, so the ciphertext was exactly as long as the plaintext and
+//   the column leaked the shape of what it held: roughly how many words the phrase has, and
+//   whether a PIN or a passphrase is set. Three real vaults measured 243, 121 and 109 bytes. That
+//   does NOT help anyone crack a keyword - it is target selection ("this one looks carefully
+//   managed") and metadata - but it is free to remove, so it should not be there.
+// A SINGLE size, not buckets: every ciphertext is now exactly VAULT_PT_MAX bytes, so the leak goes
+//   to zero rather than merely getting coarser. Bucketing would still say which bucket.
+// ⚠️ NUL is the pad byte and that choice is load-bearing. json_encode() escapes a NUL as \u0000
+//   even when one is present in the DATA, so a literal 0x00 can never occur inside a payload -
+//   which makes rtrim() an exact inverse rather than a guess. Verified with NULs stuffed into
+//   every field of the payload.
+// ⚠️ This is what makes old rows keep working with NO migration and NO format flag: an unpadded
+//   payload has no trailing NULs, so v_unpad() is a no-op on it. There is deliberately no version
+//   marker to get wrong. Do not "improve" this into a length prefix - that would need one.
+function v_pad($pt) {
+    if (!is_string($pt) || strlen($pt) > VAULT_PT_MAX) return false;   // caller must refuse, not truncate
+    return $pt . str_repeat("\0", VAULT_PT_MAX - strlen($pt));
+}
+function v_unpad($pt) {
+    return is_string($pt) ? rtrim($pt, "\0") : $pt;                    // false stays false
+}
+
 function v_encrypt($plaintext, $keyword, $iter) {
-    if (!is_string($plaintext) || strlen($plaintext) > VAULT_PT_MAX) return false;
+    $plaintext = v_pad($plaintext);                 // fixed length; refuses oversize (see v_pad)
+    if ($plaintext === false) return false;
     $salt  = random_bytes(16);
     $nonce = random_bytes(12);
     $tag   = '';
@@ -59,7 +83,7 @@ function v_encrypt($plaintext, $keyword, $iter) {
 function v_decrypt($rec, $keyword) {
     $key = v_derive($keyword, $rec['salt'], (int)$rec['iter']);
     if ($key === false) return false;
-    return openssl_decrypt($rec['ct'], 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $rec['nonce'], $rec['tag'], VAULT_AAD);
+    return v_unpad(openssl_decrypt($rec['ct'], 'aes-256-gcm', $key, OPENSSL_RAW_DATA, $rec['nonce'], $rec['tag'], VAULT_AAD));
 }
 
 // ---- Envelope scheme (format 2) — shared vaults ----------------------------
@@ -105,7 +129,8 @@ function v_unwrap($slot, $keyword) {
 // random salt, because those columns are NOT NULL from the format-1 scheme.
 function v_encrypt_dek($plaintext, $dek) {
     if (!is_string($dek) || strlen($dek) !== 32) return false;
-    if (!is_string($plaintext) || strlen($plaintext) > VAULT_PT_MAX) return false;   // see VAULT_PT_MAX
+    $plaintext = v_pad($plaintext);                 // fixed length; refuses oversize (see v_pad)
+    if ($plaintext === false) return false;
     $nonce = random_bytes(12);
     $tag   = '';
     $ct    = openssl_encrypt($plaintext, 'aes-256-gcm', $dek, OPENSSL_RAW_DATA, $nonce, $tag, VAULT_AAD_V2, 16);
@@ -116,5 +141,5 @@ function v_encrypt_dek($plaintext, $dek) {
 // Decrypt a format-2 payload. Returns plaintext, or false.
 function v_decrypt_dek($rec, $dek) {
     if (!is_string($dek) || strlen($dek) !== 32) return false;
-    return openssl_decrypt($rec['ct'], 'aes-256-gcm', $dek, OPENSSL_RAW_DATA, $rec['nonce'], $rec['tag'], VAULT_AAD_V2);
+    return v_unpad(openssl_decrypt($rec['ct'], 'aes-256-gcm', $dek, OPENSSL_RAW_DATA, $rec['nonce'], $rec['tag'], VAULT_AAD_V2));
 }

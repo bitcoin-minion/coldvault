@@ -31,7 +31,7 @@ So:
 
 | Threat | Protected? |
 |---|---|
-| Stolen database dump | **Yes.** Ciphertext only. No phrase, no keyword. |
+| Stolen database dump | **Yes.** Ciphertext only. No phrase, no keyword. Since 2026-09-08 every payload is padded to one fixed length, so the ciphertext no longer reveals how long a phrase is or whether a PIN or passphrase is set. |
 | Stolen filesystem backup | **Yes**, unless it also contains `coldvault.env` — and even then, no phrase. |
 | Database credentials leaked (read) | **Yes.** Ciphertext only, same as a dump. |
 | Database *write* access | Phrases stay sealed. Account takeover by transplanting credentials is blocked: APP_KEY blobs and backup-code hashes are bound to their row. |
@@ -205,9 +205,26 @@ moving the funds is the only real remedy. The UI states this rather than implyin
 
 ## Privacy
 
-The application records **no client IP**. There is no `REMOTE_ADDR` read, no address
-column, and no per-visitor counter anywhere in the code. The sign-up throttle stores
-timestamps only.
+The application stores **no client IP**. There is no address column and no per-visitor
+counter anywhere in the code, and the sign-up throttle stores timestamps only.
+
+WARNING - **one deliberate exception, added 2026-09-08, described here rather than buried.**
+`REMOTE_ADDR` is read in exactly one function, `cv_client_bucket()`, and never stored. It
+exists because a rate-limit budget keyed on a *username alone* is a denial of service:
+anyone who knew a username could keep its shared clock fresh and hold that account shut
+indefinitely. The escape hatch has to be capacity an attacker cannot spend, and client
+identity is the only honest candidate.
+
+What is kept is not an address. It is 16 bits of HMAC-SHA256 over the address, under a key
+derived from `APP_KEY` - which lives outside the database - that **rotates every hour**. So
+roughly 65,000 IPv4 addresses share each of the 65,536 possible values, two hours of buckets
+cannot be correlated, and the rows carrying it self-purge after an hour like every other row
+in that table. Somebody holding both the database *and* `APP_KEY` learns "one of about
+65,000 addresses", within a one-hour window.
+
+Key rotation, truncation to 16 bits, and the hourly purge are all load-bearing. If you
+change this, keep all three. `X-Forwarded-For` is deliberately **not** consulted: a client
+controls that header and could mint a fresh bucket per request, defeating the point.
 
 **No third-party requests, either.** Every asset is served from your own origin: the fonts
 are bundled as woff2 under `public/fonts/`, the CAPTCHA is generated locally, the QR code

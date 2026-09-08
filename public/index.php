@@ -2180,10 +2180,45 @@ elseif ($action === 'unlock') {
             }
             // 2026-09-03: transparent migration to the shared-capable format, gated by config.
             //   A failure here is harmless: the vault stays format 1 and is already revealed.
+            $__upgraded = false;
             if (VAULT_AUTO_UPGRADE && (int)$row['format'] === 1
                 && vault_upgrade_v2($con, $revealedId, $__uid, $kw, $open[0])) {
                 $msg = 'Vault upgraded to the shared-capable format.';
+                $__upgraded = true;
             }
+            /* 2026-09-08 (Pass 8): re-pad an older vault the first time it is opened. Padding cost
+               nothing to add for NEW writes, but an existing vault keeps leaking its length until
+               something re-encrypts it - and a vault nobody edits would leak for ever. There is no
+               server-side migration for this and there should not be: re-encrypting needs the data
+               key, the data key needs a keyword, and nothing here holds one. The keyword the owner
+               just typed is the only moment it CAN happen, which is the same reasoning the format
+               upgrade above already runs on.
+               Safe by construction: it re-encrypts the SAME payload under the SAME data key, so no
+               keyslot and nobody else's access is involved. Verified before the write, scoped, and
+               affected-rows checked; if any of that fails nothing is written and the vault stays
+               unpadded and perfectly openable. Never fatal to a read. */
+            // NOT after a successful upgrade: vault_upgrade_v2() re-encrypts through
+            // v_encrypt_dek(), so it has already written a padded ciphertext. Without this guard
+            // the length below is read from the PRE-upgrade snapshot and we would encrypt and
+            // write a second time for nothing.
+            if (!$__upgraded && (int)$row['format'] === 2 && strlen((string)$row['ciphertext']) < VAULT_PT_MAX) {
+                $__rp = v_encrypt_dek($open[0], $open[1]);
+                if ($__rp !== false && v_decrypt_dek($__rp, $open[1]) === $open[0]
+                    && strlen($__rp['ct']) === VAULT_PT_MAX) {
+                    $__rpq = mysqli_prepare($con, "UPDATE vault SET nonce=?,tag=?,ciphertext=?
+                                                   WHERE id=? AND format=2 AND user_id=?");
+                    if ($__rpq) {
+                        // scoped to the CALLER's id, which is the owner clause every other write in
+                        // this file carries. It also makes this self-limiting: a guest opening
+                        // somebody else's vault matches 0 rows and writes nothing, so a read never
+                        // mutates a row the reader does not own. The owner re-pads it themselves.
+                        mysqli_stmt_bind_param($__rpq, 'sssii', $__rp['nonce'], $__rp['tag'], $__rp['ct'], $revealedId, $__uid);
+                        mysqli_stmt_execute($__rpq);
+                    }
+                }
+                unset($__rp, $__rpq);
+            }
+            unset($__upgraded);
             break;
         }
         if ($revealed === null) {   // 2026-09-08 (L1): count the wrong keyword

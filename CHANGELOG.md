@@ -6,6 +6,56 @@ There are no release tags yet, so each entry describes the state of `main` on th
 
 ---
 
+## 2026-09-08 - the ciphertext no longer leaks its shape
+
+### Fixed - payload length was visible in the database
+
+AES-GCM adds no padding, so a ciphertext was exactly as long as the payload it held. A dump
+therefore showed roughly how many words each phrase had and whether a PIN or passphrase was set -
+three real vaults measured 243, 121 and 109 bytes. To be clear about severity: that does **not**
+help anyone crack a keyword. It is metadata and target selection ("this one looks carefully
+managed"). It was worth removing because removing it is free, not because it was dangerous.
+
+Every payload is now padded to one fixed length before encryption, so all ciphertexts are exactly
+the same size and the leak goes to zero rather than merely getting coarser. A single size, not
+buckets - bucketing would still say which bucket.
+
+**No migration, no format flag, no version column.** NUL is the pad byte, and that choice carries
+the whole design: `json_encode()` escapes a NUL as `\u0000` even when one is present in
+the *data*, so a literal `0x00` can never appear inside a payload - which makes `rtrim()` an exact
+inverse rather than a guess. An older unpadded payload has no trailing NULs, so unpadding is a
+no-op on it and old rows keep working untouched. Verified with NULs stuffed into every field.
+
+### Existing vaults re-pad themselves when you open them
+
+There is deliberately **no server-side migration**, and there cannot be one: re-encrypting needs
+the data key, the data key needs a keyword, and nothing on the server holds a keyword. That is the
+property which makes a stolen database useless, so the absence is the feature.
+
+The keyword you type at unlock is the only moment it can happen, which is the same reasoning the
+existing format-1-to-2 upgrade already runs on. A single write of nonce, tag and ciphertext,
+verified before writing, scoped and affected-rows checked. If any of it fails, nothing is written
+and the vault stays unpadded and perfectly openable - this can never break a read.
+
+- It re-encrypts the **same payload under the same data key**, so no keyslot and nobody else's
+  access is touched.
+- Scoped to the caller's own id, which makes it self-limiting: a **guest** opening somebody else's
+  vault matches zero rows and writes nothing, so a read never mutates a row the reader does not
+  own. Verified - a guest unlock left the owner's ciphertext byte-identical.
+- Skipped after a format upgrade, which already writes a padded ciphertext; otherwise the length
+  check reads a pre-upgrade snapshot and encrypts a second time for nothing.
+- Idempotent: a second unlock writes nothing.
+
+### Also corrected
+
+`SECURITY.md` claimed the application had "no `REMOTE_ADDR` read" anywhere. That stopped being
+true when the per-client rate-limit reserve was added earlier the same day. It now describes that
+one read in full - what it keeps, why an address alone will not do, and which three properties of
+the derivation are load-bearing - in the Privacy section, rather than leaving a reader to find it
+in the source and wonder.
+
+---
+
 ## 2026-09-08 — a guest can change their own keyword
 
 ### Fixed — the one thing a shared-vault guest could not do for themselves
