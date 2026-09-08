@@ -106,6 +106,16 @@ define('INVITE_TTL_HOURS', 72);
 define('INVITE_MAX_FAILS', 10);
 define('MIN_KEYSLOT_BITS', 65);
 
+// 2026-09-07 (security review): each keyword attempt costs one ~1s PBKDF2 derivation. To stop a
+// single account from turning that into a CPU-amplification DoS:
+//   MAX_VAULTS_PER_ACCOUNT  hard cap on vaults an account may create.
+//   COLLISION_CHECK_MAX     above this many vaults, skip the informational "same keyword opens
+//                           another vault" check (which derives once per existing vault).
+// Unlock additionally refuses to fan out across every vault when no specific vault was chosen
+// (see the unlock handler) - it derives exactly once against the chosen vault.
+define('MAX_VAULTS_PER_ACCOUNT', 50);
+define('COLLISION_CHECK_MAX', 25);
+
 // ============================================================================
 // How many words a recovery phrase may have.
 //   BIP39 mnemonics : 12, 15, 18, 21, 24 words (128 to 256 bits of entropy)

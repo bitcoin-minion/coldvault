@@ -90,6 +90,16 @@ function vault_rows_for($con, $uid) {
     return $out;
 }
 
+// 2026-09-07 (security review): how many vaults this account OWNS (for the per-account cap).
+function vault_count_for($con, $uid) {
+    $st = mysqli_prepare($con, "SELECT COUNT(*) c FROM vault WHERE user_id = ?");
+    if (!$st) return 0;
+    mysqli_stmt_bind_param($st, 'i', $uid);
+    mysqli_stmt_execute($st);
+    $r = mysqli_stmt_get_result($st); $row = $r ? mysqli_fetch_assoc($r) : null;
+    return $row ? (int)$row['c'] : 0;
+}
+
 // 2026-09-03: the vaults this user can open, WITHOUT any crypto material - just enough
 //   to draw a chooser. Names are optional and APP_KEY-encrypted at rest, because
 //   a vault name is sensitive metadata in its own right.
@@ -156,7 +166,11 @@ function seed_normalise($raw) {
 //   called when a keyword is being SET, never on a plain unlock.
 function vault_keyword_collision($con, $uid, $kw, $exceptVaultId = 0) {
     if ($kw === '') return 0;
-    foreach (vault_rows_for($con, $uid) as $row) {
+    $rows = vault_rows_for($con, $uid);
+    // 2026-09-07 (security review): this derives once per vault (~1s each). It is only an advisory
+    //   note, so above COLLISION_CHECK_MAX vaults skip it rather than pay unbounded PBKDF2 per call.
+    if (count($rows) > COLLISION_CHECK_MAX) return 0;
+    foreach ($rows as $row) {
         if ((int)$row['id'] === (int)$exceptVaultId) continue;
         if (vault_try_open($row, $kw) !== false) return (int)$row['id'];
     }
@@ -955,6 +969,13 @@ if (!auth_is_logged_in($con)) {
 /* ================= authenticated below ================= */
 $__uid = (int)auth_uid();
 
+// 2026-09-07 (security review): an invite row holds the vault's data key wrapped under the invite
+//   code. Expiry was only a SELECT filter, so an unredeemed, uncancelled invite kept that wrapped
+//   key in the database forever - a leaked "expired" code plus a backup then still opened the vault.
+//   Purge expired, unredeemed invites at rest on each authenticated request, the way the sign-up
+//   throttle self-purges. Cheap (indexed) and bounded.
+mysqli_query($con, "DELETE FROM vault_invite WHERE used_at IS NULL AND expires_at < NOW()");
+
 /* ===== 2026-09-06: opaque references -> row ids. ONE translation for every POST =====
    The same one-gate reasoning as the CSRF check: doing this in a single place means every
    handler below still reads a plain integer id and needed no change at all, which keeps this
@@ -1467,6 +1488,15 @@ if ($action === 'create') {
     $vname = trim((string)($_POST['vname'] ?? ''));
 
     if ($kw === '' || $kw !== $kw2)        $err = 'Keywords are empty or do not match.';
+    // 2026-09-07 (security review): bound PIN/passphrase length so the encrypted payload cannot be
+    //   silently truncated by the ciphertext column on a non-strict SQL server (permanent, unnoticed
+    //   loss of the phrase). The generous caps keep the JSON well within varbinary(2048).
+    elseif (strlen($pin) > 128)  $err = 'PIN is too long (max 128 characters).';
+    elseif (strlen($pass) > 512) $err = 'Passphrase is too long (max 512 characters).';
+    // 2026-09-07 (security review): cap vaults per account. Each keyword attempt costs one PBKDF2
+    //   derivation, so an unbounded vault count is a DoS lever (see the unlock handler).
+    elseif (vault_count_for($con, $__uid) >= MAX_VAULTS_PER_ACCOUNT)
+        $err = 'You have reached the maximum of '.MAX_VAULTS_PER_ACCOUNT.' vaults for one account.';
     elseif ($vname !== '' && !preg_match('/^[\pL\pN ._\-]{1,40}$/u', $vname))
         $err = 'Vault name: up to 40 letters, numbers, spaces, dots, dashes.';
     // 2026-09-03: the entropy floor applies to the OWNER too. It previously only
@@ -1492,7 +1522,7 @@ if ($action === 'create') {
             mysqli_stmt_bind_param($stmt, 'iisssss', $__uid, $rec['iter'], $rec['salt'], $rec['nonce'], $rec['tag'], $rec['ct'], $nenc);
             if (mysqli_stmt_execute($stmt)) {
                 $newid = mysqli_insert_id($con);
-                $clash = vault_keyword_collision($con, $__uid, $kw, $newid);
+                $clash = vault_keyword_collision($con, $__uid, $kw, $newid);   // self-bounds past COLLISION_CHECK_MAX vaults
                 $msg = 'Vault ' . ($vname !== '' ? '"' . $vname . '" ' : '') . 'encrypted and stored.'
                      . ($clash > 0 ? ' Note: that keyword also opens another of your vaults - if it were ever exposed, both would be.' : '');
             }
@@ -1511,6 +1541,13 @@ elseif ($action === 'unlock') {
         //   one - and an unlock costs one derivation however many vaults you own.
         $__want = (int)($_POST['vault_id'] ?? 0);
         $__rows = vault_rows_for($con, $__uid);
+        // 2026-09-07 (security review): never fan out across every vault. With no chosen vault and
+        //   more than one reachable, refuse (the chooser always sends a ref) - a crafted POST could
+        //   otherwise force one ~1s PBKDF2 derivation per vault, an unbounded CPU-amplification DoS.
+        if ($__want <= 0 && count($__rows) > 1) {
+            $err = 'Choose a vault first.';
+            $pickedVault = 0; $kw = '';
+        } else {
         if ($__want > 0) {
             $__only = [];
             foreach ($__rows as $r) if ((int)$r['id'] === $__want) $__only[] = $r;
@@ -1538,6 +1575,7 @@ elseif ($action === 'unlock') {
             $err = ($__want > 0) ? 'That keyword does not open the vault you chose.' : 'No vault matches that keyword.';
         $pickedVault = $__want;   // stay on that vault's keyword step either way
         $kw = '';
+        }
     }
     // 2026-09-03: AJAX REVEAL. The phrase is returned as JSON and written into the grid by
     //   script, so it is never part of an HTML document: no copy in the page source, none
