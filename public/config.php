@@ -142,6 +142,11 @@ function cv_unavailable() {
     exit('Vault temporarily unavailable.');
 }
 
+// 2026-09-07 (security review): the CAPTCHA is the rate limiter on the passwordless sign-in, so it
+// must be a real image challenge. GD + FreeType is now a hard requirement - the decodable SVG
+// fallback was removed. Refuse to start without it, so this is caught at install, not in production.
+if (!function_exists('imagecreatetruecolor') || !function_exists('imagettftext')) { cv_unavailable(); }
+
 // ---------------------------------------------------------------------------
 // APP_KEY must decode to exactly 32 bytes, and the app REFUSES TO START
 // otherwise — deliberately no default and no fallback.

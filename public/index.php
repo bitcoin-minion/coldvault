@@ -2045,7 +2045,14 @@ elseif ($action === 'invite_cancel') {
   })();
 
   // wipe inputs when leaving/hiding the page (defeats bfcache retention)
-  window.addEventListener('pagehide',()=>document.querySelectorAll('input:not([type=hidden])').forEach(i=>{if(!i.readOnly)i.value='';}));
+  // 2026-09-07 (security review): wipe the revealed phrase on leave AND on tab-switch. The old
+  //   handler skipped readonly inputs - which is exactly what the reveal grid uses while "Show" is
+  //   active - and never cleared the CV_SEED variable, and there was no visibilitychange handler at
+  //   all despite the UI promising that switching tabs re-locks.
+  function cvIsRevealed(){var rb=document.getElementById('revealbox');return rb&&rb.style.display!=='none';}
+  function cvWipeAllInputs(){document.querySelectorAll('input:not([type=hidden])').forEach(function(i){i.value='';});}
+  window.addEventListener('pagehide',function(){ if(typeof cvWipeSeed==='function')cvWipeSeed(); cvWipeAllInputs(); });
+  document.addEventListener('visibilitychange',function(){ if(document.visibilityState==='hidden' && cvIsRevealed() && typeof cvRelock==='function') cvRelock(); });
   // 2026-09-01: auto-hide — a decrypted vault re-locks (wipes) after 60s unless you tap the clock
   const CV_DUR=60; let cvLeft=CV_DUR, cvT=null;
   function cvClockShow(){const c=document.getElementById('cvclock');if(!c)return;const t=c.querySelector('.tt');if(t)t.textContent=Math.floor(cvLeft/60)+':'+String(cvLeft%60).padStart(2,'0');c.classList.toggle('warn',cvLeft<=15&&cvLeft>5);c.classList.toggle('crit',cvLeft<=5);}
