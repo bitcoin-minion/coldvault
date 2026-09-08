@@ -192,8 +192,7 @@ function vault_upgrade_v2($con, $vid, $uid, $kw, $payload) {
     if ($label === false)                        return false;
 
     $ok = false;
-    mysqli_begin_transaction($con);
-    do {
+    if (mysqli_begin_transaction($con)) do {   // 2026-09-07 (security review): skip the block if the txn could not start
         $zero = 0; $unused = random_bytes(16);   // iterations/salt are unused under format 2, but NOT NULL
         $u = mysqli_prepare($con, "UPDATE vault SET format=2, iterations=?, salt=?, nonce=?, tag=?, ciphertext=?
                                    WHERE id=? AND user_id=? AND format=1");
@@ -252,8 +251,7 @@ function vault_transfer_owner($con, $row, $actorUid, $newOwnerUid) {
     if (!$r || !mysqli_fetch_assoc($r)) return 'That person does not have access to this vault, so they cannot own it. Invite them first.';
 
     $ok = false;
-    mysqli_begin_transaction($con);
-    do {
+    if (mysqli_begin_transaction($con)) do {   // 2026-09-07 (security review): skip the block if the txn could not start
         $u = mysqli_prepare($con, "UPDATE vault SET user_id=? WHERE id=? AND user_id=?");
         if (!$u) break;
         mysqli_stmt_bind_param($u, 'iii', $newOwnerUid, $vid, $actorUid);
@@ -299,8 +297,7 @@ function vault_revoke($con, $row, $actorUid, $kw) {
     if (v_unwrap($slot, $kw) !== $dek2)              return 'Self-check failed; nothing was changed.';
 
     $ok = false;
-    mysqli_begin_transaction($con);
-    do {
+    if (mysqli_begin_transaction($con)) do {   // 2026-09-07 (security review): skip the block if the txn could not start
         $d = mysqli_prepare($con, "DELETE FROM vault_keyslot WHERE vault_id=? AND user_id<>?");
         if (!$d) break;
         mysqli_stmt_bind_param($d, 'ii', $vid, $actorUid);
@@ -354,8 +351,7 @@ function vault_delete($con, $row, $actorUid) {
     if ((int)($row['owner_id'] ?? 0) !== (int)$actorUid) return 'Only the owner of this vault can delete it.';
 
     $ok = false;
-    mysqli_begin_transaction($con);
-    do {
+    if (mysqli_begin_transaction($con)) do {   // 2026-09-07 (security review): skip the block if the txn could not start
         // The owner clause repeats the check above on purpose: every other write in this file
         // carries one, so a future refactor cannot turn this into delete-any-vault-by-id.
         $d = mysqli_prepare($con, "DELETE FROM vault WHERE id=? AND user_id=?");
@@ -397,8 +393,7 @@ function vault_save($con, $row, $uid, $kw, $newkw, $payload, $dek) {
             if ($newslot === false || v_unwrap($newslot, $newkw) !== $dek) return 'Update self-check failed; nothing changed.';
         }
         $ok = false;
-        mysqli_begin_transaction($con);
-        do {
+        if (mysqli_begin_transaction($con)) do {   // 2026-09-07 (security review): skip the block if the txn could not start
             $u = mysqli_prepare($con, "UPDATE vault SET nonce=?,tag=?,ciphertext=? WHERE id=? AND format=2");
             if (!$u) break;
             mysqli_stmt_bind_param($u, 'sssi', $body['nonce'], $body['tag'], $body['ct'], $vid);
@@ -820,6 +815,10 @@ function sec_stepup_field($id) {
         . '<div class="field"><input id="'.$id.'" name="stepup" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="6-digit code or backup code" autocorrect="off" autocapitalize="characters" spellcheck="false"></div>';
 }
 function render_security($con, $uid, $err = null, $msg = null) {
+    // 2026-09-07 (security review): reaching the account page means we are NOT mid re-pair, so drop
+    //   any pending new-authenticator secret. Previously "Cancel" (a plain link back here) left it
+    //   in the session with no expiry, so someone who had seen the QR could later finish the swap.
+    unset($_SESSION['cv_sec_secret'], $_SESSION['cv_sec_secret_ts']);
     $left = bc_unused_count($con, $uid);
     $col  = $left <= 2 ? ' style="color:var(--danger)"' : '';
     $inner = '<h2 class="at">Account security</h2>'
@@ -1032,11 +1031,17 @@ if ($action === 'sec_rekey_start') {
     $e = auth_stepup_check($con, $__uid, (string)($_POST['stepup'] ?? ''));
     if ($e !== '') { render_security($con, $__uid, $e); exit; }
     $_SESSION['cv_sec_secret'] = base32_encode(gen_totp_secret());
+    $_SESSION['cv_sec_secret_ts'] = time();   // 2026-09-07 (security review): stamp for a TTL
     render_security_rekey($_SESSION['cv_sec_secret'], null); exit;
 }
 if ($action === 'sec_rekey_confirm') {
     $b32 = $_SESSION['cv_sec_secret'] ?? '';
-    if ($b32 === '') { render_security($con, $__uid, 'That took too long — start again.'); exit; }
+    // 2026-09-07 (security review): the pending secret expires after 10 minutes, so a step-up
+    //   authorisation to start a re-pair cannot be completed much later from a walked-up session.
+    if ($b32 === '' || (time() - (int)($_SESSION['cv_sec_secret_ts'] ?? 0)) > 600) {
+        unset($_SESSION['cv_sec_secret'], $_SESSION['cv_sec_secret_ts']);
+        render_security($con, $__uid, 'That took too long — start again.'); exit;
+    }
     if (totp_verify(base32_decode($b32), $_POST['code'] ?? '', time(), 1) === false) {
         render_security_rekey($b32, 'That code did not match — check the new app and try again.'); exit;
     }
@@ -1332,8 +1337,7 @@ if ($action === 'redeem') {
     if ($slot === false || v_unwrap($slot, $kw) !== $dek) { render_redeem('Self-check failed; nothing was changed. Try again.'); exit; }
 
     $ok = false;
-    mysqli_begin_transaction($con);
-    do {
+    if (mysqli_begin_transaction($con)) do {   // 2026-09-07 (security review): skip the block if the txn could not start
         $i = mysqli_prepare($con, "INSERT INTO vault_keyslot (vault_id,user_id,label_enc,iterations,salt,nonce,tag,wrapped_dek) VALUES (?,?,?,?,?,?,?,?)");
         if (!$i) break;
         mysqli_stmt_bind_param($i, 'iisissss', $vid, $__uid, $inv['label_enc'], $slot['iter'], $slot['salt'], $slot['nonce'], $slot['tag'], $slot['ct']);
@@ -1829,8 +1833,16 @@ elseif ($action === 'invite_cancel') {
         <div class="factlist">
           <div class="lh"><svg viewBox="0 0 24 24" width="14" height="14" stroke="currentColor" fill="none" stroke-width="1.6"><path d="M12 3l7 3v6c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z"/></svg> who can open it</div>
           <ul>
-            <?php foreach($__ks as $k): ?>
-            <li><svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 6 9 17l-5-5"/></svg><span><b><?php echo h($k['label']);?></b> &middot; <span class="m"><?php echo h($k['username'] ?? '?');?></span> &middot; added <?php echo h(substr((string)$k['created_at'],0,10));?><?php if((int)$k['user_id'] === $__ownerId): ?> &middot; <span class="m" style="color:var(--amber)">owner</span><?php endif; ?><?php echo $k['last_used_at']?' &middot; last used '.h(substr((string)$k['last_used_at'],0,10)):'';?><?php if($__isOwner && (int)$k['user_id'] !== $__uid): ?>
+            <?php
+              // 2026-09-07 (security review): a GUEST no longer sees every other holder's private
+              //   label, username and join date - only their own row. Those labels are notes the
+              //   OWNER wrote about third parties ("wife", "lawyer"), so showing the full sharing
+              //   graph to every guest leaked the owner's and co-holders' identities.
+              foreach($__ks as $k): if(!$__isOwner && (int)$k['user_id'] !== $__uid) continue;
+                // A guest sees a neutral label for their own row, never the owner's private note.
+                $__klabel = $__isOwner ? $k['label'] : 'Your access';
+              ?>
+            <li><svg viewBox="0 0 24 24" stroke-width="1.8"><path d="M20 6 9 17l-5-5"/></svg><span><b><?php echo h($__klabel);?></b> &middot; <span class="m"><?php echo h($k['username'] ?? '?');?></span> &middot; added <?php echo h(substr((string)$k['created_at'],0,10));?><?php if((int)$k['user_id'] === $__ownerId): ?> &middot; <span class="m" style="color:var(--amber)">owner</span><?php endif; ?><?php echo $k['last_used_at']?' &middot; last used '.h(substr((string)$k['last_used_at'],0,10)):'';?><?php if($__isOwner && (int)$k['user_id'] !== $__uid): ?>
               <form method="POST" action="" style="display:inline;margin-left:8px"><input type="hidden" name="action" value="revoke_form"><?php echo cv_csrf_field();?><input type="hidden" name="vault_id" value="<?php echo cv_ref($revealedId, 'vault');?>"><input type="hidden" name="keyslot_id" value="<?php echo cv_ref($k['id'], 'keyslot');?>"><button class="btn btn-ghost" type="submit" data-busytext="Opening&hellip;" style="padding:4px 10px;font-size:9.5px;letter-spacing:1px">Remove</button></form>
             <?php endif; ?></span></li>
             <?php endforeach; ?>
