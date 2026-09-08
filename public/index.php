@@ -418,6 +418,44 @@ function vault_invite_create($con, $row, $uid, $code, $label, $dek) {
     return null;
 }
 
+/* 2026-09-08 (Pass 7): let a keyslot holder change THEIR OWN keyword.
+   Until now `new_keyword` existed in exactly one place - the owner-only update handler, which
+   rejects a non-owner before vault_save() is ever reached - so a guest whose keyword had leaked
+   could do nothing about it themselves. Their only remedy was to ask the owner to remove them and
+   re-invite them, which is a strange thing to need a second person for, and it means the sensible
+   reaction to "I think my keyword is compromised" was unavailable to exactly the people most
+   likely to need it.
+   This re-wraps ONE keyslot: the caller's. It deliberately does NOT touch vault.ciphertext and
+   does NOT mint a new data key. That is what makes it safe for a shared vault - the owner and
+   every other holder are unaffected BY CONSTRUCTION rather than by remembering to be careful.
+   ⚠️ Do NOT "improve" this into rotating the data key. A new key invalidates every other keyslot,
+   and no other holder's keyword is available here to re-wrap with, so a guest rotating would lock
+   the owner out of their own vault. Rotation belongs to vault_save(), which only does it when the
+   caller is the sole holder.
+   Owner-only actions stay owner-only: this grants nobody access, changes no content, and cannot
+   remove anyone. It is the one thing a guest should be able to do alone.
+   Returns null on success, or an error string - same convention as vault_save(). */
+function vault_rewrap_slot($con, $row, $uid, $kw, $newkw) {
+    $vid = (int)$row['id'];
+    if ((int)$row['format'] !== 2)  return 'This vault is not on the shared-capable format.';
+    if ($newkw === '')              return 'Enter the new keyword.';
+    if ($row['k_ct'] === null)      return 'You do not have your own keyword on this vault.';
+    $open = vault_try_open($row, $kw);
+    if ($open === false)            return 'Wrong keyword - nothing was changed.';
+    $dek = $open[1];
+    if (!is_string($dek) || strlen($dek) !== 32) return 'Could not read this vault.';
+
+    $slot = v_wrap($dek, $newkw, VAULT_ITER);
+    if ($slot === false || v_unwrap($slot, $newkw) !== $dek) return 'Self-check failed; nothing was changed.';
+
+    $u = mysqli_prepare($con, "UPDATE vault_keyslot SET iterations=?,salt=?,nonce=?,tag=?,wrapped_dek=?
+                               WHERE vault_id=? AND user_id=?");
+    if (!$u) return 'Could not change your keyword.';
+    mysqli_stmt_bind_param($u, 'issssii', $slot['iter'], $slot['salt'], $slot['nonce'], $slot['tag'], $slot['ct'], $vid, $uid);
+    if (!mysqli_stmt_execute($u) || mysqli_stmt_affected_rows($u) !== 1) return 'Could not change your keyword.';
+    return null;
+}
+
 // 2026-09-08 (Pass 5): $rotated is an OUT parameter - true when the data key was actually
 //   replaced, false when the keyword was only re-wrapped around the existing one. The handler
 //   needs it to tell the owner the truth, and only this function knows which happened. By
@@ -1002,8 +1040,14 @@ function cv_busy_js() {
      attribute handler runs at the element, before anything bound on document. */
   document.addEventListener('submit',function(e){
     var f=e.target;
-    if(!f||!f.getAttribute||f.getAttribute('data-cv-validate')!=='validateCreate') return;
-    if(typeof window.validateCreate==='function'&&!window.validateCreate()) e.preventDefault();
+    if(!f||!f.getAttribute) return;
+    var cvv=f.getAttribute('data-cv-validate');
+    /* 2026-09-08 (Pass 7): a second validator. Compared by NAME against an explicit list and
+       dispatched by explicit branch - deliberately NOT window[cvv](), which is what SECURITY.md
+       records as avoided so injected markup can never reach an arbitrary global. Add a branch
+       here for each new validator; do not turn this into a lookup. */
+    if(cvv==='validateCreate'){ if(typeof window.validateCreate==='function'&&!window.validateCreate()) e.preventDefault(); return; }
+    if(cvv==='validateRekey'){  if(typeof window.validateRekey==='function' &&!window.validateRekey())  e.preventDefault(); return; }
   },false);
 
   document.addEventListener('submit',function(e){
@@ -1979,6 +2023,44 @@ if ($action === 'invite_create') {
     render_invite_code($code, $label); exit;
 }
 
+/* 2026-09-08 (Pass 7): change YOUR OWN keyword on a vault somebody else owns.
+   Rate limiting needs nothing here: the one-gate near the top of this file already fires for any
+   POST carrying `keyword` or `new_keyword`, so both the wrong-keyword budget and the work budget
+   apply to this action the moment it exists. That is the whole point of gating in one place.
+   The OWNER is deliberately refused and sent to Edit instead. Edit rotates the data key when the
+   vault has a single holder, so it does strictly more; offering an owner two keyword paths of
+   different strength is a trap, and for a SHARED vault Edit already performs exactly this re-wrap,
+   so nothing is lost by refusing here.
+   No step-up code, deliberately and consistently with Edit: the current keyword is the proof, and
+   whoever holds it can already read the seed - a worse outcome than changing it. */
+if ($action === 'rekey_slot') {
+    $activeTab = 'unlock';
+    $vid   = (int)($_POST['vault_id'] ?? 0);
+    $kw    = (string)($_POST['keyword'] ?? '');
+    $newkw = (string)($_POST['new_keyword'] ?? '');
+    $row = null;
+    foreach (vault_rows_for($con, $__uid) as $r) if ((int)$r['id'] === $vid) $row = $r;   // only vaults you can open
+    if (!$row) { $_SESSION['cv_flash'] = 'Vault not found.'; header('Location: ' . APP_BASE); exit; }
+    if ((int)$row['owner_id'] === $__uid) {
+        $_SESSION['cv_flash'] = 'You own this vault - use Edit to change its keyword, which also retires the old one.';
+        header('Location: ' . APP_BASE); exit;
+    }
+    if ($kw === '' || $newkw === '')                        $__rkErr = 'Enter your current keyword and the new one.';
+    // the floor applies to a guest too: a shared vault is only as strong as its weakest keyword,
+    // so somebody with read access must not be able to soften the lock on somebody else's seed.
+    elseif (cv_entropy($newkw) < MIN_KEYSLOT_BITS)
+        $__rkErr = 'That new keyword is too weak (~'.cv_entropy($newkw).' bits; needs ~'.MIN_KEYSLOT_BITS.'). Nothing was changed.';
+    else {
+        $__rkErr = vault_rewrap_slot($con, $row, $__uid, $kw, $newkw);
+        if ($__rkErr !== null && strpos($__rkErr, 'Wrong keyword') === 0) kw_fail_record($con, $__uid);
+    }
+    $_SESSION['cv_flash'] = ($__rkErr === null)
+        ? 'Your keyword for this vault has been changed. Your old one no longer opens it. Nobody else was affected.'
+        : $__rkErr;
+    $kw = $newkw = '';
+    header('Location: ' . APP_BASE); exit;
+}
+
 if ($action === 'create') {
     $activeTab = 'create';
     $kw  = (string)($_POST['keyword']  ?? '');
@@ -2398,7 +2480,23 @@ elseif ($action === 'invite_cancel') {
           </ul>
         </div>
         <?php if(!$__isOwner): ?>
-        <div class="hint" style="margin-top:12px">You can open and read this vault. Only its owner can change its contents, or invite and remove people.</div>
+        <div class="hint" style="margin-top:12px">You can open and read this vault, and change your own keyword for it. Only its owner can change its contents, or invite and remove people.</div>
+        <!-- 2026-09-08 (Pass 7): a guest can now rotate their own keyword. This used to say only
+             that the owner could change things, which read as "you can change nothing" - so
+             somebody who thought their keyword had leaked had to ask the owner to remove and
+             re-invite them. Its own form, because nesting a form inside #editForm is invalid HTML
+             and #editForm posts action=update. -->
+        <form method="POST" action="" autocomplete="off" style="margin-top:14px" id="rkForm" data-cv-validate="validateRekey">
+          <input type="hidden" name="action" value="rekey_slot">
+          <?php echo cv_csrf_field();?>
+          <input type="hidden" name="vault_id" value="<?php echo cv_ref($revealedId, 'vault');?>">
+          <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
+            <div><label class="fl" for="rkcur">Your current keyword</label><div class="field"><input id="rkcur" name="keyword" type="password" placeholder="the one you just used" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"></div></div>
+            <div><label class="fl" for="rknew">Your new keyword</label><div class="field"><input id="rknew" name="new_keyword" type="password" placeholder="needs ~<?php echo (int)MIN_KEYSLOT_BITS;?>+ bits" autocomplete="new-password" autocorrect="off" autocapitalize="off" spellcheck="false"></div></div>
+          </div>
+          <div class="row" style="margin-top:12px"><button class="btn btn-ghost" type="submit" data-busytext="Changing&hellip;" style="padding:11px 18px;font-size:11px"><svg viewBox="0 0 24 24" stroke-width="2"><path d="M4 4v6h6M20 20v-6h-6"/><path d="M20 9a8 8 0 0 0-14-3M4 15a8 8 0 0 0 14 3"/></svg> Change my keyword</button></div>
+          <div class="hint" style="margin-top:10px">This changes only <b>your own</b> way in. The vault's contents are untouched, and the owner and anyone else with access keep their own keywords.</div>
+        </form>
         <?php else: ?>
         <form method="POST" action="" style="margin-top:14px">
           <input type="hidden" name="action" value="invite_form">
@@ -2580,6 +2678,18 @@ elseif ($action === 'invite_cancel') {
     if(CV_LENS.indexOf(n)<0){toast('pick a valid phrase length',false);return false;}
     const ws=[...document.querySelectorAll('#cseed input[name="w[]"]')].slice(0,n);
     if(ws.some(i=>!i.value.trim())){toast('fill all '+n+' words',false);return false;}return true;}
+  /* 2026-09-08 (Pass 7): a keyslot holder changing their own keyword. Checks the floor in the
+     browser first for the same reason the create form does - a server rejection here would send
+     them back to a re-locked vault, having to unlock and retype everything. */
+  function validateRekey(){
+    var cur=document.getElementById('rkcur'),nw=document.getElementById('rknew');
+    if(!cur||!nw) return true;
+    if(!cur.value){toast('enter your current keyword',false);cur.focus();return false;}
+    if(!nw.value){toast('enter your new keyword',false);nw.focus();return false;}
+    if(nw.value===cur.value){toast('that is the keyword you already have',false);nw.focus();return false;}
+    var nb=cvEntropy(nw.value);
+    if(nb<CV_MIN){toast('new keyword too weak: ~'+nb+' bits, needs ~'+CV_MIN,false);nw.focus();return false;}
+    return true;}
   // strength meter
   const CV_MIN = <?php echo (int)MIN_KEYSLOT_BITS;?>;   // 2026-09-03: same floor as the server
   // 2026-09-03: distinct words only, and the character fallback caps length at twice the

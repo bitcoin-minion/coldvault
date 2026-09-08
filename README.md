@@ -118,9 +118,14 @@ See [SECURITY.md](SECURITY.md) for the full threat model and the known residual 
 - The owner issues a **one-time invite code** (~120 bits, 72-hour default TTL). Only its
   HMAC is stored, so a database leak yields no working invite.
 - The invitee signs into their own account and chooses **their own keyword**.
-- Guests get read access only. Rename, invite, remove, transfer and delete are owner-only,
-  and that is enforced inside the functions that do the work — not just in the request
-  handler.
+- Guests get read access to the contents, and **can change their own keyword** — that one
+  action re-wraps only their own keyslot, leaving the ciphertext and the data key untouched, so
+  the owner and every other holder are unaffected by construction. Rename, invite, remove,
+  transfer and delete are owner-only, and that is enforced inside the functions that do the
+  work — not just in the request handler.
+  (Until 2026-09-08 a guest could change nothing at all, so somebody who thought their keyword
+  had leaked had to ask the owner to remove and re-invite them. Needing a second person to react
+  to your own possible compromise was the wrong shape.)
 - **Removing someone rotates the key.** A retained keyslot row plus the ciphertext still
   yields the key offline, so removal mints a new data key and re-encrypts. Every other
   keyslot is invalidated by design, and the confirmation page says so.

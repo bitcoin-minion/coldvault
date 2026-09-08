@@ -6,6 +6,45 @@ There are no release tags yet, so each entry describes the state of `main` on th
 
 ---
 
+## 2026-09-08 — a guest can change their own keyword
+
+### Fixed — the one thing a shared-vault guest could not do for themselves
+
+`new_keyword` existed in exactly one place: the owner-only update handler, which rejects a
+non-owner before the save function is ever reached. So somebody holding a keyslot on a vault they
+did not own could **not change their own keyword** — their only remedy was to ask the owner to
+remove them and re-invite them. Needing a second person in order to react to your own possible
+compromise is the wrong shape, and it fell hardest on exactly the people most likely to need it.
+
+`vault_rewrap_slot()` re-wraps **one** keyslot: the caller's. It deliberately does not touch the
+ciphertext and does not mint a new data key, which is what makes it safe on a shared vault — the
+owner and every other holder are unaffected **by construction** rather than by remembering to be
+careful. Verified on a three-holder vault: after a guest re-key the ciphertext and the owner's and
+the other guest's keyslots are all **byte-identical**, both still open with their own keywords, the
+guest's new keyword works and their old one does not, and a forced write failure leaves the guest
+still holding the keyword they had.
+
+- **The entropy floor applies to a guest too.** A shared vault is only as strong as its weakest
+  keyword, so read access must not come with the ability to soften the lock on somebody else's
+  seed.
+- **The owner is refused this path and pointed at Edit**, because Edit rotates the data key when
+  the vault has a single holder and therefore does strictly more. Offering one person two keyword
+  paths of differing strength is a trap; for a shared vault Edit already performs exactly this
+  re-wrap, so nothing is lost.
+- **No step-up code**, consistent with Edit: the current keyword is the proof, and whoever holds it
+  can already read the seed — a worse outcome than changing it.
+- Rate limiting needed no new code. The single gate that fires for any request carrying a keyword
+  already applies both the wrong-keyword budget and the work budget to this action.
+- ⚠️ Do not "improve" this into rotating the data key. A new key invalidates every other keyslot,
+  and no other holder's keyword is available to re-wrap with, so a guest rotating would lock the
+  owner out of their own vault.
+
+The client-side validator dispatch now handles a second validator by explicit name comparison and
+an explicit branch — **not** `window[name]()`, which `SECURITY.md` records as deliberately avoided
+so injected markup can never reach an arbitrary global.
+
+---
+
 ## 2026-09-08 — patterned keywords, and a generator that refused its own output
 
 Closing the two entropy-floor bypasses the previous entry recorded as known limitations, plus a
