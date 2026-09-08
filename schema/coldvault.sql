@@ -186,4 +186,22 @@ CREATE TABLE `vault_reg_throttle` (
   KEY `k_ts` (`ts`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
+-- ---------------------------------------------------------------------------
+-- vault_login_throttle — per-account sign-in rate limiting (2026-09-07, security review).
+--
+-- One timestamp per code EVALUATION, keyed by the attempted username_lc (which is
+-- server-side state a client cannot clear by dropping its cookie). It bounds an
+-- attacker to LOGIN_MAX_PER_HOUR code guesses per account per hour, then a slow
+-- trickle - but it NEVER fully locks the account: the owner is always allowed at
+-- least one attempt every LOGIN_THROTTLE_INTERVAL seconds, so unlike the old
+-- five-strike lock an outsider cannot hold a known username shut. The same rule is
+-- applied whether or not the username exists, so it reveals nothing about existence.
+-- Rows older than an hour are purged lazily on each attempt. No client IP is stored.
+-- ---------------------------------------------------------------------------
+CREATE TABLE `vault_login_throttle` (
+  `username_lc` varchar(64) NOT NULL,
+  `ts` datetime NOT NULL,
+  KEY `k_lc_ts` (`username_lc`,`ts`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
 SET FOREIGN_KEY_CHECKS = 1;

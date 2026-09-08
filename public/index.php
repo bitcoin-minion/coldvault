@@ -900,19 +900,26 @@ if (!auth_is_logged_in($con)) {
     if ($__ga === 'login') {
         $u = trim($_POST['username'] ?? '');
         $row = user_find($con, $u);
-        // 2026-09-03: the human check is now gated on server-side state as well as on the
-        //   session. The session counter alone could be cleared by simply dropping the
-        //   cookie, so a script could keep guessing codes without ever meeting a check;
-        //   fail_count lives in the database and cannot be reset from the client. An
-        //   unknown username is treated exactly like a gated one, so the requirement
-        //   itself never reveals whether an account exists.
+        // 2026-09-03: the human check is gated on server-side state as well as on the session,
+        //   because the session counter alone could be cleared by dropping the cookie. fail_count
+        //   lives in the database and cannot be reset from the client.
+        // 2026-09-07 (security review): the `!$row` term was REMOVED. Forcing the CAPTCHA only for
+        //   unknown usernames made the first response differ (known -> "Invalid username or code.",
+        //   unknown -> "Solve the human check"), which enumerated accounts for free. An unknown
+        //   name now takes exactly the same path and message as a known-but-ungated one.
         $needCap = (($_SESSION['cv_login_fails'] ?? 0) >= 1)
-                || !$row
-                || (int)$row['fail_count'] >= AUTH_CAPTCHA_AFTER;
+                || (int)($row['fail_count'] ?? 0) >= AUTH_CAPTCHA_AFTER;
         if ($needCap && !captcha_check($_POST['captcha'] ?? '')) {
             $_SESSION['cv_login_fails'] = ($_SESSION['cv_login_fails'] ?? 0) + 1;
             render_login('Solve the human check below, then try again.', true, $u); exit;
         }
+        // 2026-09-07 (security review): per-account evaluation budget. Once LOGIN_MAX_PER_HOUR code
+        //   guesses for this username have been made in the last hour, further guesses are throttled
+        //   to one per LOGIN_THROTTLE_INTERVAL. This never fully locks the owner (unlike the removed
+        //   five-strike lock), and is applied identically to unknown usernames so it leaks nothing.
+        $wait = login_throttle_wait($con, $u);
+        if ($wait > 0) { render_login('Too many attempts - wait '.$wait.'s, then try again.', $needCap, $u); exit; }
+        login_throttle_record($con, $u);
         // 2026-09-03: a lockout is no longer a refusal HERE, because it was a denial of
         //   service: anyone who knew a username could hold that account shut for good with
         //   five wrong codes every five minutes, and the wait message also told an attacker

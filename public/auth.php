@@ -22,6 +22,14 @@ define('AUTH_LOCK_SECS',   300);   // lockout duration (step-up path only - see 
 //   shut indefinitely. It counts fail_count, which is server-side state a client cannot
 //   clear by dropping its cookie.
 define('AUTH_CAPTCHA_AFTER', 3);
+// 2026-09-07 (security review): per-account sign-in budget. A sign-in is one 6-digit code with
+//   no password, so the CAPTCHA was the ONLY limiter and ~333k guesses (a few hundred dollars of
+//   solving) was affordable. This caps code evaluations per username per hour, then throttles to
+//   one per LOGIN_THROTTLE_INTERVAL - but never fully locks, so an outsider cannot hold a known
+//   username shut (the reason the old five-strike lock was removed). Applied identically to
+//   unknown usernames, so it leaks nothing about existence.
+define('LOGIN_MAX_PER_HOUR',   30);
+define('LOGIN_THROTTLE_INTERVAL', 60);   // seconds between attempts once the hourly budget is spent
 // Registrations allowed per hour SITE-WIDE. There is no per-address counter
 // because no client IP is ever recorded (see the privacy notes in README).
 // Accepted trade-off: a sign-up flood can block new registrations for an hour.
@@ -246,3 +254,24 @@ function cv_csrf_ok(){ auth_session_start(); $t=(string)($_SESSION['cv_csrf'] ??
 //   Known trade-off: a flood of sign-ups can block new registrations for an hour.
 function reg_throttled($con){ mysqli_query($con,"DELETE FROM vault_reg_throttle WHERE ts < (NOW() - INTERVAL 1 HOUR)");$r=mysqli_query($con,"SELECT COUNT(*) c FROM vault_reg_throttle WHERE ts > (NOW() - INTERVAL 1 HOUR)");$row=$r?mysqli_fetch_assoc($r):null;return $row&&(int)$row['c']>=REG_MAX_PER_HOUR; }
 function reg_record($con){ mysqli_query($con,"INSERT INTO vault_reg_throttle (ts) VALUES (NOW())"); }
+
+// ---- per-account sign-in throttle (2026-09-07 security review) ----
+// Returns seconds the caller must wait before another code evaluation for this username, or 0.
+// Under the hourly budget it returns 0 (evaluate freely). Once the budget is spent it returns 0
+// only if LOGIN_THROTTLE_INTERVAL has elapsed since the last attempt, so the account is slowed but
+// never fully locked. Keyed on username_lc regardless of whether the account exists.
+function login_throttle_wait($con,$username){
+    $lc=strtolower(trim($username)); if($lc==='')return 0;
+    mysqli_query($con,"DELETE FROM vault_login_throttle WHERE ts < (NOW() - INTERVAL 1 HOUR)");
+    $s=mysqli_prepare($con,"SELECT COUNT(*) c, TIMESTAMPDIFF(SECOND, MAX(ts), NOW()) since FROM vault_login_throttle WHERE username_lc=? AND ts > (NOW() - INTERVAL 1 HOUR)");
+    if(!$s)return 0;
+    mysqli_stmt_bind_param($s,'s',$lc);mysqli_stmt_execute($s);$r=mysqli_stmt_get_result($s);$row=$r?mysqli_fetch_assoc($r):null;
+    if(!$row||(int)$row['c']<LOGIN_MAX_PER_HOUR)return 0;
+    $since=($row['since']===null)?LOGIN_THROTTLE_INTERVAL:(int)$row['since'];
+    return ($since>=LOGIN_THROTTLE_INTERVAL)?0:(LOGIN_THROTTLE_INTERVAL-$since);
+}
+function login_throttle_record($con,$username){
+    $lc=strtolower(trim($username)); if($lc==='')return;
+    $s=mysqli_prepare($con,"INSERT INTO vault_login_throttle (username_lc,ts) VALUES (?,NOW())");
+    if($s){mysqli_stmt_bind_param($s,'s',$lc);mysqli_stmt_execute($s);}
+}

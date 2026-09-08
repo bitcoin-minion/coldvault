@@ -20,6 +20,39 @@ followed by a date, for example `2026-09-06`. Compare that with the newest entry
 
 ---
 
+## The security-review release (2026-09-07)
+
+This release hardens authentication, transport, and denial-of-service handling. It replaces
+`public/index.php`, `public/auth.php`, `public/config.php`, `public/env.php`, `public/captcha.php`,
+`public/style.css`, and adds **one new database table**.
+
+| | |
+|---|---|
+| Database change needed? | **Yes — one new table.** Run the statement below (or re-apply `schema/coldvault.sql`, which is additive). |
+| New setting in `coldvault.env`? | **Optional.** `TRUST_FORWARDED_PROTO=1` only if TLS is terminated by a proxy in front of this app; leave it unset for a direct-to-Apache/cPanel install. |
+| Do I have to re-enter my `APP_KEY`? | **No.** Never re-generate it. Existing authenticator secrets, labels and backup codes keep working; secrets are re-encrypted in a stronger form automatically on each account's next sign-in. |
+
+Apply the new table (safe to run once; it stores no client IP):
+
+```sql
+CREATE TABLE `vault_login_throttle` (
+  `username_lc` varchar(64) NOT NULL,
+  `ts` datetime NOT NULL,
+  KEY `k_lc_ts` (`username_lc`,`ts`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+```
+
+If your host serves the app **without a TLS-terminating proxy** (Apache/cPanel talking HTTPS
+directly), do nothing extra. If a proxy terminates TLS and forwards to this app, set
+`TRUST_FORWARDED_PROTO=1` in `coldvault.env` so the HTTPS check still works; otherwise the app
+now ignores a client-supplied `X-Forwarded-Proto` header (that header could previously be used to
+bypass the HTTPS requirement).
+
+**Backup codes:** codes issued before this release keep working, but for the full anti-tampering
+benefit, sign in and regenerate them once from **Account security**.
+
+---
+
 ## The short version for the 2026-09-06 release
 
 **Replace one file: `public/index.php`. That is the whole update.**
