@@ -160,6 +160,33 @@ Several of these are worse than code bugs, because a reader follows them.
 - `.gitignore` now covers the suffixes the documentation itself asks operators to create
   (`*.backup`, `*.previous`, `*.save`, `coldvault.env.*`), kept in step with the deny list.
 
+### Added — a real re-key on keyword change
+
+- **Setting a new keyword now rotates the vault's data key, when the vault has exactly one
+  keyslot.** Previously a keyword change only re-*wrapped* the existing data key, so the old
+  keyword plus a retained copy of the keyslot row and the ciphertext still derived that key — for
+  ever, including every later edit. "Change your keyword because it may have leaked" therefore
+  changed the label on the lock and not the lock, and a sole owner had no re-key path at all,
+  because the only other place a new data key was minted is the remove-access flow, which refuses
+  to remove your own keyslot. The honest workaround was to create a second vault, copy the phrase
+  across and delete the first.
+- **A shared vault deliberately does not rotate on a keyword change.** A new data key invalidates
+  every other keyslot, and no other holder's keyword is available to re-wrap with, so rotating
+  silently would cut people off as a side effect of an action the owner did not understand. The
+  keyword change re-wraps only the caller's slot, and the app now *says* the old keyword still
+  opens the vault and what to do about it. Re-keying a shared vault is the remove-access flow,
+  which already rotates and already warns.
+- The weak-keyword notice follows the same distinction, because advice that is right for one case
+  is confidently wrong for the other.
+- Cost is unchanged at two key derivations for the wrap and its self-check — minting a key and
+  encrypting under it involve no KDF work — plus one more for a read-back.
+- ⚠️ **The failure mode here is permanent, so the failure path is tested, not assumed.** Ciphertext
+  written under a new data key while the keyslot still wraps the old one is a vault that can never
+  be opened again. Every check runs before any write, both writes are verified to touch exactly one
+  row, and the vault is then re-opened through the real read path *inside* the transaction. A
+  forced mid-rotation failure was verified to roll back and leave the vault openable by the **old**
+  keyword — not by neither.
+
 ### Known limitations, stated deliberately
 
 - The keyword entropy estimator charges a repeated or sequential letter run as a run rather than a

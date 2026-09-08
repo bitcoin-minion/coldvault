@@ -124,6 +124,14 @@ See [SECURITY.md](SECURITY.md) for the full threat model and the known residual 
 - **Removing someone rotates the key.** A retained keyslot row plus the ciphertext still
   yields the key offline, so removal mints a new data key and re-encrypts. Every other
   keyslot is invalidated by design, and the confirmation page says so.
+- **Changing your keyword also rotates the key — when the vault is yours alone.** For a vault
+  only you can open, setting a new keyword mints a new data key and re-encrypts, so the old
+  keyword stops working even for somebody holding an older copy of the rows. On a **shared**
+  vault it cannot: a new data key would invalidate everyone else's keyslot, and their keywords
+  are not available to re-wrap with. There, the keyword change re-wraps only your own slot and
+  the app tells you plainly that the old keyword still opens the vault — remove the others to
+  retire it, then invite them back. Verified including the failure path: a rotation that cannot
+  complete rolls back and leaves the vault openable by the old keyword rather than by neither.
 - Ownership can be transferred to someone who already holds a keyslot. Authority moves;
   the old owner keeps read access and loses everything else.
 - **Deleting a vault destroys it, and every key to it.** Owner-only, on its own untimed

@@ -418,7 +418,12 @@ function vault_invite_create($con, $row, $uid, $code, $label, $dek) {
     return null;
 }
 
-function vault_save($con, $row, $uid, $kw, $newkw, $payload, $dek) {
+// 2026-09-08 (Pass 5): $rotated is an OUT parameter - true when the data key was actually
+//   replaced, false when the keyword was only re-wrapped around the existing one. The handler
+//   needs it to tell the owner the truth, and only this function knows which happened. By
+//   reference with a default, so it cannot break a caller that does not care.
+function vault_save($con, $row, $uid, $kw, $newkw, $payload, $dek, &$rotated = null) {
+    $rotated = false;
     $vid = (int)$row['id'];
     // 2026-09-03: SECURITY - only the owner may change what a vault CONTAINS. A guest
     //   holding a keyslot can read the seed (that is the point of sharing) but must not
@@ -427,13 +432,46 @@ function vault_save($con, $row, $uid, $kw, $newkw, $payload, $dek) {
     //   that does the writing, not merely in the request handler.
     if ((int)($row['owner_id'] ?? 0) !== (int)$uid) return 'Only the owner of this vault can change what it contains.';
     if ((int)$row['format'] === 2) {
-        $body = v_encrypt_dek($payload, $dek);
-        if ($body === false || v_decrypt_dek($body, $dek) !== $payload) return 'Update self-check failed; nothing changed.';
+        /* 2026-09-08 (Pass 5): ROTATE THE DATA KEY when a new keyword is set and doing so costs
+           nobody their access. Until now a keyword change only RE-WRAPPED the same DEK, so the old
+           keyword plus a copy of the old keyslot row and ciphertext still derived that DEK - for
+           ever. "Change your keyword because it may have leaked" therefore changed the label on the
+           lock and not the lock, and a sole owner had no re-key path at all: vault_revoke() is the
+           only other caller of v_new_dek() and it refuses to remove your own keyslot.
+           Rotation is only safe to do silently when there is exactly ONE keyslot, because a new DEK
+           invalidates every OTHER keyslot and nobody else's keyword is available here to re-wrap
+           with. A shared vault therefore keeps the re-wrap and the handler says so explicitly;
+           re-keying a shared vault means removing everyone, which is what vault_revoke() already
+           does and already warns about.
+           Cost: unchanged at two derivations (wrap + self-check) - v_new_dek and v_encrypt_dek do
+           no KDF work - plus one for the read-back below.
+           ⚠️ The danger here is asymmetric and permanent: ciphertext written under the new DEK while
+           the keyslot still wraps the old one is a vault that can never be opened again. So every
+           check is made BEFORE any write, both writes are mandatory and verified to touch exactly
+           one row, and the row is then re-opened through the real code path INSIDE the transaction.
+           Anything short of all of that rolls back. Same shape as vault_upgrade_v2(). */
+        $rotate = false;
+        if ($newkw !== '') {
+            $slotCount = 0;
+            $sc = mysqli_prepare($con, "SELECT COUNT(*) c FROM vault_keyslot WHERE vault_id=?");
+            if (!$sc) return 'Could not save changes.';          // fail closed: never guess at this
+            mysqli_stmt_bind_param($sc, 'i', $vid); mysqli_stmt_execute($sc);
+            $scr = mysqli_stmt_get_result($sc); $scrow = $scr ? mysqli_fetch_assoc($scr) : null;
+            if (!$scrow) return 'Could not save changes.';
+            $slotCount = (int)$scrow['c'];
+            $rotate = ($slotCount === 1);
+        }
+
+        $dekOut = $rotate ? v_new_dek() : $dek;
+        $body   = v_encrypt_dek($payload, $dekOut);
+        if ($body === false || v_decrypt_dek($body, $dekOut) !== $payload) return 'Update self-check failed; nothing changed.';
         $newslot = null;
         if ($newkw !== '') {
-            $newslot = v_wrap($dek, $newkw, VAULT_ITER);
-            if ($newslot === false || v_unwrap($newslot, $newkw) !== $dek) return 'Update self-check failed; nothing changed.';
+            $newslot = v_wrap($dekOut, $newkw, VAULT_ITER);
+            if ($newslot === false || v_unwrap($newslot, $newkw) !== $dekOut) return 'Update self-check failed; nothing changed.';
         }
+        // a rotation MUST write the keyslot; there is no valid outcome where only one of the two lands
+        if ($rotate && $newslot === null) return 'Update self-check failed; nothing changed.';
         $ok = false;
         if (mysqli_begin_transaction($con)) do {   // 2026-09-07 (security review): skip the block if the txn could not start
             // 2026-09-08 (second independent review): owner clause + affected-rows check. The
@@ -454,14 +492,29 @@ function vault_save($con, $row, $uid, $kw, $newkw, $payload, $dek) {
                 mysqli_stmt_bind_param($k, 'issssii', $newslot['iter'], $newslot['salt'], $newslot['nonce'], $newslot['tag'], $newslot['ct'], $vid, $uid);
                 if (!mysqli_stmt_execute($k) || mysqli_stmt_affected_rows($k) !== 1) break;
             }
+            /* 2026-09-08 (Pass 5): after a ROTATION, prove the vault still opens - through the real
+               read path, with the real new keyword, while the transaction can still be undone. The
+               in-memory self-checks above prove the crypto; this proves the DATABASE holds what we
+               think it holds. Costs one derivation and is the difference between a failed update and
+               a permanently unopenable backup. Only on rotation: a plain re-wrap leaves the DEK and
+               the ciphertext consistent by construction. */
+            if ($rotate) {
+                $back = null;
+                foreach (vault_rows_for($con, $uid) as $r) if ((int)$r['id'] === $vid) $back = $r;
+                if (!$back || vault_try_open($back, $newkw) === false) break;
+            }
             $ok = true;
         } while (false);
         if (!$ok) { mysqli_rollback($con); return 'Could not save changes.'; }
         mysqli_commit($con);
+        $rotated = $rotate;
         return null;
     }
-    // format 1 — unchanged: the keyword encrypts the payload directly
+    // format 1 — unchanged: the keyword encrypts the payload directly, so setting a new one
+    //   re-encrypts everything under it with a fresh salt and nonce. That is already a complete
+    //   re-key; there is no separate data key to rotate (2026-09-08, Pass 5).
     $enckw = $newkw !== '' ? $newkw : $kw;
+    if ($newkw !== '') $rotated = true;
     $rec = v_encrypt($payload, $enckw, VAULT_ITER);
     if ($rec === false || v_decrypt($rec, $enckw) !== $payload) return 'Update self-check failed; nothing changed.';
     // 2026-09-08 (second independent review): AND format=1, plus an affected-rows check. Without
@@ -1966,12 +2019,32 @@ elseif ($action === 'unlock') {
             //   nudge - never blocking, never stored, never logged.
             $__kwBits = cv_entropy($kw);
             // 2026-09-08 (second independent review, HIGH): this used to advise "Edit, then New
-            //   keyword", which does NOT retire the weak keyword. Setting a new keyword re-wraps
+            //   keyword", which did NOT retire the weak keyword - setting a new keyword re-wrapped
             //   the existing data key rather than replacing it, so anyone holding an old copy of
-            //   this vault's rows plus the OLD keyword can still read it, and every later edit,
-            //   indefinitely. Until a real re-key exists, the honest remedy is a new vault. Plain
-            //   language only here - UI copy never names internal mechanisms.
-            if ($__kwBits < MIN_KEYSLOT_BITS) $notice = 'Your keyword measures about '.$__kwBits.' bits. New keywords now need ~'.MIN_KEYSLOT_BITS.'. Changing the keyword on this vault does not retire the old one - to replace it properly, create a new vault with a stronger keyword, copy this phrase into it, then delete this vault.';
+            //   this vault's rows plus the OLD keyword could still read it, and every later edit,
+            //   indefinitely. The advice then became "create a new vault and copy the phrase over".
+            // 2026-09-08 (Pass 5): a real re-key now exists for a vault only YOU can open, so the
+            //   simple advice is correct again for that case - see vault_save(). A SHARED vault
+            //   still cannot rotate on a keyword change without cutting the other people off, so
+            //   it keeps the longer remedy. The advice therefore has to follow the keyslot count,
+            //   or it is confidently wrong in one of the two cases.
+            // Plain language only here - UI copy never names internal mechanisms.
+            if ($__kwBits < MIN_KEYSLOT_BITS) {
+                $__shared = false;
+                if ((int)$row['format'] === 2) {
+                    $__sc = mysqli_prepare($con, "SELECT COUNT(*) c FROM vault_keyslot WHERE vault_id=?");
+                    if ($__sc) {
+                        mysqli_stmt_bind_param($__sc, 'i', $revealedId); mysqli_stmt_execute($__sc);
+                        $__scr = mysqli_stmt_get_result($__sc); $__scrow = $__scr ? mysqli_fetch_assoc($__scr) : null;
+                        $__shared = $__scrow ? ((int)$__scrow['c'] > 1) : true;   // unknown -> assume shared, the cautious advice
+                    } else { $__shared = true; }
+                }
+                $notice = 'Your keyword measures about '.$__kwBits.' bits. New keywords now need ~'.MIN_KEYSLOT_BITS.'. '
+                        . ($__shared
+                           ? 'Because other people can open this vault, changing your keyword here does not retire the old one. To replace it properly, remove the other people from this vault, set a strong new keyword, then invite them back.'
+                           : 'Use Edit and set a strong new keyword - on this vault that fully replaces the old one, which will stop opening it.');
+                unset($__shared, $__sc, $__scr, $__scrow);
+            }
             // 2026-09-03: transparent migration to the shared-capable format, gated by config.
             //   A failure here is harmless: the vault stays format 1 and is already revealed.
             if (VAULT_AUTO_UPGRADE && (int)$row['format'] === 1
@@ -2054,7 +2127,8 @@ elseif ($action === 'update') {
         elseif ((int)$row['owner_id'] !== $__uid) $err = 'Read-only: only the owner of this vault can change what it contains.';
         else {
             $payload = json_encode(['w'=>$words,'pin'=>$pin,'pass'=>$pass], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
-            $err = vault_save($con, $row, $__uid, $kw, $newkw, $payload, $open[1]);
+            $__rotated = false;
+            $err = vault_save($con, $row, $__uid, $kw, $newkw, $payload, $open[1], $__rotated);
             if ($err === null) {
                 // rename is owner-only, like every other change to a vault
                 $vname = trim((string)($_POST['vname'] ?? ''));
@@ -2069,10 +2143,18 @@ elseif ($action === 'update') {
                     if ($un) { mysqli_stmt_bind_param($un, 'sii', $nenc, $vid, $__uid); mysqli_stmt_execute($un); }
                 }
                 $__clash = ($newkw !== '') ? vault_keyword_collision($con, $__uid, $newkw, $vid) : 0;
+                // 2026-09-08 (Pass 5): say which of the two actually happened, because the
+                //   difference is the whole point. A rotation retires the old keyword; a
+                //   re-wrap does not, and pretending otherwise is what the old copy did.
+                //   Plain language - UI copy never names internal mechanisms.
                 $msg = 'Vault updated.'
-                     . ($newkw !== '' ? ((int)$row['format'] === 2
-                        ? ' Your keyword changed (anyone else with access keeps theirs).'
-                        : ' Keyword changed.') : '')
+                     . ($newkw === '' ? '' : ($__rotated
+                        ? ' Keyword changed - the old one no longer opens this vault, even for'
+                          . ' someone holding an old copy of it.'
+                        : ' Keyword changed for you, and everyone else with access keeps theirs.'
+                          . ' Note: the old keyword still opens this vault for anyone holding an'
+                          . ' older copy of it. To retire it completely, remove the other people'
+                          . ' from this vault - that replaces the key - then invite them back.'))
                      . ($__clash > 0 ? ' Note: that keyword also opens another of your vaults - if it were ever exposed, both would be.' : '');
                 $revealed = ['w'=>$words,'pin'=>$pin,'pass'=>$pass]; $revealedId = $vid;
             }
