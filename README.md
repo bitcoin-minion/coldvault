@@ -350,6 +350,8 @@ coldvault/
 ├── schema/coldvault.sql     structure only — no data, no users, no keys
 ├── tools/genkey.php         generate an APP_KEY
 ├── tools/kwcheck.php        offline keyword auditor (`--selftest`, `--explain`)
+├── tools/parity-check.php   prove every copy of the estimator agrees
+├── tools/migrate-aad.php    one-off upgrade step (see UPGRADING.md)
 ├── coldvault.env.example    configuration template
 ├── INSTALL.md  SECURITY.md  LICENSE
 └── coldvault.env            YOU create this. Never committed.
@@ -363,22 +365,33 @@ coldvault/
 
 | Copy | Where |
 |---|---|
-| `cv_entropy()` | `public/index.php` — server-side enforcement |
-| `cvEntropy()` | the page script in `public/index.php` |
-| `rEnt()` | the redeem screen script in `public/index.php` |
+| `cv_entropy()` | `public/index.php` — **the server-side enforcement**; this one decides |
+| `cvEntropy()` | the browser twin, emitted by `cv_kw_meter_js()` in `public/index.php` |
 | `cv_entropy()` | `tools/kwcheck.php` — the offline auditor |
 
-Plus a fifth value, the floor itself: `MIN_KEYSLOT_BITS` in `config.php`, mirrored as
-`CV_MIN` in the page script and `CV_MIN_BITS` in `kwcheck.php`.
+Three definitions. The browser twin is *emitted twice* — on the vault screen and on the
+redeem screen — but from one function, so there is nothing to keep in step there. (This
+table used to list a fourth copy, `rEnt()`, on the redeem screen. It was a real separate
+copy, it did drift, and it was collapsed into `cv_kw_meter_js()` on 2026-09-08. The table
+had not caught up.)
 
-After touching any of them, run:
+Plus the floor itself: `MIN_KEYSLOT_BITS` in `config.php`, mirrored as `CV_MIN` in the
+browser twin and `CV_MIN_BITS` in `kwcheck.php`.
+
+After touching any of them, run **both** of these:
 
 ```bash
-php tools/kwcheck.php --selftest
+php tools/parity-check.php      # every copy over a generated corpus, and the generator
+php tools/kwcheck.php --selftest # fixed vectors and the accept/refuse boundary
 ```
 
-It asserts numeric parity against fixed vectors **and** the accept/refuse boundary. It is
-the only thing standing between you and a client that accepts what the server refuses.
+They catch different things and you need both. `--selftest` pins exact numbers, so it
+catches a change in *value*. `parity-check` runs every copy over the same few hundred
+inputs, so it catches a change in *agreement* — which a text diff cannot, because both
+divergences that have shipped were in library calls spelled identically in the two
+languages: a separator class where PCRE and JavaScript disagreed on U+FEFF, and
+`strtolower()` versus `toLowerCase()`, which differ on 676 of 1,379 cased characters and
+made the server score a keyword 81 bits where the browser said 40.
 
 Two traps worth knowing about if you extend the estimator:
 
@@ -420,9 +433,11 @@ Issues and pull requests are welcome. Three things worth knowing before you star
   what they were a response to — authorization lives inside the functions that write, and
   removing someone rotates the key rather than deleting a row, for reasons that are
   documented.
-- **Run `php tools/kwcheck.php --selftest`** after any change to the keyword strength
-  estimator. It exists in four places that must agree, and the self-test is the only thing
-  standing between you and a client that accepts what the server refuses.
+- **Run `php tools/parity-check.php` and `php tools/kwcheck.php --selftest`** after any
+  change to the keyword strength estimator. It is defined in three places that must agree,
+  and these two are what stand between you and a server that accepts what the meter
+  refused. The parity check also verifies that the **Generate** button always clears the
+  app's own floor — it once produced a refused keyword about 1 time in 20,000.
 - **Never add a second Content-Security-Policy.** Two are both enforced, and the overlap
   blocks the application's own scripts. The policy belongs in `config.php`, because the
   nonce has to be generated per request.

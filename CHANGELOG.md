@@ -52,6 +52,36 @@ people toward. Found by simulation while measuring the change above, not by repo
 without replacement; over the same 20,000 outputs the minimum went from 62 bits with one failure to
 **84 bits with none**.
 
+### Added — `tools/parity-check.php`
+
+The measurements behind the change above were one-off scripts. They are now a shipped tool, because
+the next person to touch the estimator needs them and a text diff will not do: **both** divergences
+that have shipped were in library calls spelled identically in the two languages.
+
+```bash
+php tools/parity-check.php            # full: ~450 candidates plus the generator simulation
+php tools/parity-check.php --quick    # smaller corpus, no simulation
+```
+
+It extracts every copy from the source files **by marker rather than by line number** — a stale
+line range fails as a silent fatal instead of saying "the marker moved" — runs each in its own
+process, and compares every pair. It reports floor-crossing disagreements separately from cosmetic
+ones, because that is the difference between a mildly wrong meter and a server accepting a keyword
+weaker than its own floor. It also simulates 20,000 **Generate** outputs and fails if any lands
+under the floor. Exits non-zero on any problem, so it drops into a hook or CI unchanged.
+
+If `node` is missing it compares the PHP copies and reports the browser twin as **UNCHECKED**,
+never silently skipped — an unchecked twin is exactly how the last divergence shipped.
+
+Verified by sabotage, not by assumption: reintroducing the real `strtolower()` bug into one copy
+makes it exit 1 and name the offending candidates, `ÀÁÂÃÄÅÆÇàáâãäåæç` among them at 81 bits against
+40. It would have caught what shipped.
+
+Also corrects the README's inventory of estimator copies, which listed a fourth, `rEnt()`, on the
+redeem screen. That copy was real and did drift, but it was collapsed into `cv_kw_meter_js()` on
+2026-09-08 and the table had not caught up — so the document told contributors to keep in step with
+something that no longer existed, while under-stating what the browser twin actually is.
+
 ### Verification
 
 All four copies of the estimator — server PHP, the browser twin, and `tools/kwcheck.php` — agree on
