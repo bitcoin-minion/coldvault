@@ -1114,9 +1114,12 @@ if (!auth_is_logged_in($con)) {
         if (totp_verify(base32_decode($b32), $_POST['code'] ?? '', time(), 1) !== false) {
             if (user_exists($con, $u)) { unset($_SESSION['cv_reg_user'],$_SESSION['cv_reg_secret']); render_register_start('That username was just taken - choose another.', ''); exit; }
             $codes = gen_backup_codes(8);
+            // 2026-09-08 (internal audit, L3): claim a sign-up slot ATOMICALLY, here rather than
+            //   only at register_start - staging sessions past that advisory check used to let the
+            //   hourly cap be exceeded. Must be before user_register(), which opens its own txn.
+            if (!reg_reserve($con)) { render_register_start('Too many sign-ups in the last hour - please try again later.', ''); exit; }
             $uid = user_register($con, $u, base32_decode($b32), $codes);
             if ($uid) {
-                reg_record($con);
                 unset($_SESSION['cv_reg_user'],$_SESSION['cv_reg_secret']);
                 auth_login_user($uid, $u, user_secret_version($con, $uid));
                 render_backup_codes($codes, $u); exit;
@@ -1193,6 +1196,27 @@ $__uid = (int)auth_uid();
 //   throttle self-purges. Bounded and index-driven: k_expires on vault_invite(expires_at) serves
 //   the range predicate, so this stays O(rows purged) rather than a scan of the whole table.
 mysqli_query($con, "DELETE FROM vault_invite WHERE used_at IS NULL AND expires_at < NOW()");
+
+/* ===== 2026-09-08 (internal audit, L1): ONE keyword-attempt gate for every POST =====
+   The same one-gate reasoning as the CSRF check and the reference translation. Anything carrying a
+   keyword is refused while this account's failure budget is spent, so a stolen session cannot be
+   used as an unlimited keyword oracle. Only WRONG keywords are ever recorded (see the handlers
+   below), so a legitimate owner never meets this however much they use their vault, and it never
+   fully locks - one attempt per KW_THROTTLE_INTERVAL always gets through. */
+if ($action !== '' && (isset($_POST['keyword']) || isset($_POST['new_keyword']))) {
+    $__kwWait = kw_fail_wait($con, $__uid);
+    if ($__kwWait > 0) {
+        $__kwMsg = 'Too many wrong keywords - wait '.$__kwWait.'s, then try again.';
+        if (($_POST['ajax'] ?? '') === '1') {
+            header('Content-Type: application/json');
+            echo json_encode(['ok' => false, 'err' => $__kwMsg]);
+            exit;
+        }
+        $_SESSION['cv_flash'] = $__kwMsg;
+        header('Location: ' . APP_BASE); exit;
+    }
+    unset($__kwWait);
+}
 
 /* ===== 2026-09-06: opaque references -> row ids. ONE translation for every POST =====
    The same one-gate reasoning as the CSRF check: doing this in a single place means every
@@ -1599,7 +1623,7 @@ if ($action === 'transfer_form' || $action === 'transfer_confirm') {
     if ($nw <= 0)  { render_transfer_form($con, $vid, $__uid, 'Choose who should become the owner.'); exit; }
     if ($kw === '') { render_transfer_form($con, $vid, $__uid, 'Enter your keyword to confirm.'); exit; }
     // proving the keyword means a hijacked session alone is not enough to give the vault away
-    if (vault_try_open($row, $kw) === false) { render_transfer_form($con, $vid, $__uid, 'Wrong keyword - nothing was changed.'); exit; }
+    if (vault_try_open($row, $kw) === false) { kw_fail_record($con, $__uid); render_transfer_form($con, $vid, $__uid, 'Wrong keyword - nothing was changed.'); exit; }
     $e = auth_stepup_check($con, $__uid, (string)($_POST['stepup'] ?? ''));
     if ($e !== '') { render_transfer_form($con, $vid, $__uid, $e); exit; }
     $e2 = vault_transfer_owner($con, $row, $__uid, $nw);
@@ -1632,6 +1656,8 @@ if ($action === 'revoke_form' || $action === 'revoke_confirm') {
     $dropped = 0;
     foreach ($slots as $k) if ((int)$k['user_id'] !== $__uid && (int)$k['id'] !== $kid) $dropped++;
     $err2 = vault_revoke($con, $row, $__uid, $kw);
+    // 2026-09-08 (L1): vault_revoke() reports a wrong keyword by message, so count it here.
+    if ($err2 !== null && strpos($err2, 'Wrong keyword') === 0) kw_fail_record($con, $__uid);
     if ($err2 !== null) { render_revoke_form($con, $vid, $kid, $__uid, $err2); exit; }
     $_SESSION['cv_flash'] = 'Access removed and the vault re-keyed under a new key. Your keyword is unchanged.'
         . ($dropped > 0 ? ' '.$dropped.' other '.($dropped===1?'person needs':'people need').' a fresh invite.' : '');
@@ -1687,7 +1713,7 @@ if ($action === 'invite_create') {
     foreach (vault_rows_for($con, $__uid) as $r) if ((int)$r['id'] === $vid) $row = $r;
     $open = $row ? vault_try_open($row, $kw) : false;
     if (!$row)                        { render_invite_form($vid, $label, 'Vault not found.'); exit; }
-    if ($open === false)              { render_invite_form($vid, $label, 'Wrong keyword - no invite was created.'); exit; }
+    if ($open === false)              { kw_fail_record($con, $__uid); render_invite_form($vid, $label, 'Wrong keyword - no invite was created.'); exit; }
     if ((int)$row['format'] !== 2)    { render_invite_form($vid, $label, 'This vault is not on the shared-capable format yet. Unlock it once to upgrade it, then try again.'); exit; }
     $code = invite_new_code();
     $wrap = v_wrap($open[1], $code, VAULT_ITER);
@@ -1800,8 +1826,10 @@ elseif ($action === 'unlock') {
             }
             break;
         }
-        if ($revealed === null)
+        if ($revealed === null) {   // 2026-09-08 (L1): count the wrong keyword
+            kw_fail_record($con, $__uid);
             $err = ($__want > 0) ? 'That keyword does not open the vault you chose.' : 'No vault matches that keyword.';
+        }
         $pickedVault = $__want;   // stay on that vault's keyword step either way
         $kw = '';
         }
@@ -1858,7 +1886,7 @@ elseif ($action === 'update') {
         foreach (vault_rows_for($con, $__uid) as $r) { if ((int)$r['id'] === $vid) { $row = $r; break; } }
         $open = $row ? vault_try_open($row, $kw) : false;
         if (!$row)               $err = 'Vault not found.';
-        elseif ($open === false) $err = 'Wrong keyword — cannot update this vault.';
+        elseif ($open === false) { kw_fail_record($con, $__uid); $err = 'Wrong keyword — cannot update this vault.'; }   // 2026-09-08 (L1): count the wrong keyword
         elseif ((int)$row['owner_id'] !== $__uid) $err = 'Read-only: only the owner of this vault can change what it contains.';
         else {
             $payload = json_encode(['w'=>$words,'pin'=>$pin,'pass'=>$pass], JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);

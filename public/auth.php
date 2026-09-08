@@ -30,6 +30,14 @@ define('AUTH_CAPTCHA_AFTER', 3);
 //   unknown usernames, so it leaks nothing about existence.
 define('LOGIN_MAX_PER_HOUR',   30);
 define('LOGIN_THROTTLE_INTERVAL', 60);   // seconds between attempts once the hourly budget is spent
+// 2026-09-08 (internal audit, L1): a per-account KEYWORD-FAILURE budget. A stolen session used to
+//   be a free, silent keyword oracle - unlock / update / invite_create / revoke / transfer each
+//   derive once per guess and nothing counted the misses, so only PBKDF2's ~1.4s slowed an attacker
+//   down. Only a WRONG keyword is recorded, so a legitimate owner is never throttled however
+//   heavily they use their vault, and like the sign-in budget it NEVER fully locks: one attempt per
+//   interval always gets through, so this cannot be turned into a denial of service against them.
+define('KW_MAX_FAILS_PER_HOUR', 10);
+define('KW_THROTTLE_INTERVAL',  60);   // seconds between attempts once the failure budget is spent
 // Registrations allowed per hour SITE-WIDE. There is no per-address counter
 // because no client IP is ever recorded (see the privacy notes in README).
 // Accepted trade-off: a sign-up flood can block new registrations for an hour.
@@ -259,6 +267,33 @@ function cv_csrf_ok(){ auth_session_start(); $t=(string)($_SESSION['cv_csrf'] ??
 function reg_throttled($con){ mysqli_query($con,"DELETE FROM vault_reg_throttle WHERE ts < (NOW() - INTERVAL 1 HOUR)");$r=mysqli_query($con,"SELECT COUNT(*) c FROM vault_reg_throttle WHERE ts > (NOW() - INTERVAL 1 HOUR)");$row=$r?mysqli_fetch_assoc($r):null;return $row&&(int)$row['c']>=REG_MAX_PER_HOUR; }
 function reg_record($con){ mysqli_query($con,"INSERT INTO vault_reg_throttle (ts) VALUES (NOW())"); }
 
+// 2026-09-08 (internal audit, L3): atomically claim one of this hour's sign-up slots. TRUE if the
+//   caller may proceed. reg_throttled() above is only ADVISORY - it reserves nothing, so it stays
+//   cheap and an abandoned register_start costs the site nothing. The cap used to be checked at
+//   register_start and recorded only at register_confirm, so N sessions could be staged past the
+//   check and confirmed afterwards, exceeding it; and the count was read-then-act, so two
+//   concurrent confirms could both pass.
+//   Insert FIRST, then count the hour INCLUDING that row, and roll back if over. That is what
+//   makes it atomic without an id column - vault_reg_throttle has none, so a targeted DELETE is
+//   impossible, but a rollback removes exactly our own row.
+//   ⚠ Never call this inside another transaction: mysqli cannot nest, and user_register() opens
+//   its own. Call it immediately BEFORE creating the account.
+function reg_reserve($con){
+    mysqli_query($con,"DELETE FROM vault_reg_throttle WHERE ts < (NOW() - INTERVAL 1 HOUR)");
+    if(!mysqli_begin_transaction($con)) return !reg_throttled($con);   // degrade to the old check
+    $ok=false;
+    do {
+        if(!mysqli_query($con,"INSERT INTO vault_reg_throttle (ts) VALUES (NOW())")) break;
+        $r=mysqli_query($con,"SELECT COUNT(*) c FROM vault_reg_throttle WHERE ts > (NOW() - INTERVAL 1 HOUR)");
+        $row=$r?mysqli_fetch_assoc($r):null;
+        if(!$row) break;
+        if((int)$row['c']>REG_MAX_PER_HOUR) break;   // our own row is counted, hence > and not >=
+        $ok=true;
+    } while(false);
+    if($ok) mysqli_commit($con); else mysqli_rollback($con);
+    return $ok;
+}
+
 // ---- per-account sign-in throttle (2026-09-07 security review) ----
 // Returns seconds the caller must wait before another code evaluation for this username, or 0.
 // Under the hourly budget it returns 0 (evaluate freely). Once the budget is spent it returns 0
@@ -278,4 +313,28 @@ function login_throttle_record($con,$username){
     $lc=strtolower(trim($username)); if($lc==='')return;
     $s=mysqli_prepare($con,"INSERT INTO vault_login_throttle (username_lc,ts) VALUES (?,NOW())");
     if($s){mysqli_stmt_bind_param($s,'s',$lc);mysqli_stmt_execute($s);}
+}
+
+// ---- per-account keyword-failure budget (2026-09-08, internal audit L1) ----
+// Stored in vault_login_throttle under the key "kw:<uid>". That needs no schema change and cannot
+// collide with a real account: username_valid() is /^[A-Za-z0-9_.-]{3,32}$/, so a colon can never
+// appear in a username. Rows self-purge after an hour, the same as the sign-in budget.
+function kw_throttle_key($uid){ return 'kw:'.(int)$uid; }
+function kw_fail_wait($con,$uid){
+    if((int)$uid<=0)return 0;
+    $k=kw_throttle_key($uid);
+    mysqli_query($con,"DELETE FROM vault_login_throttle WHERE ts < (NOW() - INTERVAL 1 HOUR)");
+    $s=mysqli_prepare($con,"SELECT COUNT(*) c, TIMESTAMPDIFF(SECOND, MAX(ts), NOW()) since FROM vault_login_throttle WHERE username_lc=? AND ts > (NOW() - INTERVAL 1 HOUR)");
+    if(!$s)return 0;
+    mysqli_stmt_bind_param($s,'s',$k);mysqli_stmt_execute($s);$r=mysqli_stmt_get_result($s);$row=$r?mysqli_fetch_assoc($r):null;
+    if(!$row||(int)$row['c']<KW_MAX_FAILS_PER_HOUR)return 0;
+    $since=($row['since']===null)?KW_THROTTLE_INTERVAL:(int)$row['since'];
+    return ($since>=KW_THROTTLE_INTERVAL)?0:(KW_THROTTLE_INTERVAL-$since);
+}
+// Called ONLY when a keyword failed to open something. Never on success.
+function kw_fail_record($con,$uid){
+    if((int)$uid<=0)return;
+    $k=kw_throttle_key($uid);
+    $s=mysqli_prepare($con,"INSERT INTO vault_login_throttle (username_lc,ts) VALUES (?,NOW())");
+    if($s){mysqli_stmt_bind_param($s,'s',$k);mysqli_stmt_execute($s);}
 }

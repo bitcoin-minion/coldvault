@@ -116,6 +116,41 @@ built its own inside a string concatenation, which is exactly how they drifted. 
 emissions — they cannot diverge again. Verified: the emitted JavaScript agrees with the server over
 the same 3,414 candidates, and the redeem page's fully assembled script block parses cleanly.
 
+### Fixed: two rate-limiting gaps (no schema or configuration change)
+
+**A stolen session was an unlimited keyword oracle.** `unlock`, `update`, `invite_create`,
+`revoke` and `transfer` each derive one key per guess and nothing counted the misses, so only
+PBKDF2's ~1.4 s per attempt slowed an attacker holding a live session — enough to matter against a
+weak keyword predating the entropy floor. There is now a **per-account keyword-failure budget**:
+10 wrong keywords an hour, then one attempt per minute.
+
+Two properties are deliberate. **Only a wrong keyword is recorded**, so a legitimate owner is never
+throttled however heavily they use their vault — verified with three consecutive successful unlocks
+recording nothing. And it **never fully locks**: one attempt per interval always gets through, so
+it cannot be turned into a denial of service against the owner, the same principle as the sign-in
+budget. The check lives at a single gate covering every request that carries a keyword, alongside
+the CSRF check and the reference translation, and returns JSON on the AJAX unlock path so the
+browser sees a proper error rather than a redirect. State reuses `vault_login_throttle` under the
+key `kw:<uid>`, which needs no schema change and cannot collide with an account, because a colon
+can never appear in a username.
+
+**The sign-up cap could be exceeded, and was not atomic.** It was checked at `register_start` and
+recorded only at `register_confirm`, so N sessions could be staged past the check and completed
+afterwards; the count was also read-then-act, so two simultaneous confirmations could both pass. A
+slot is now claimed atomically immediately before the account is created — insert the row, count
+the hour including it, roll back if over, which is what makes it atomic without an id column that
+`vault_reg_throttle` does not have.
+
+The check on the first screen is kept as **advisory only** so an honest user is told before pairing
+an authenticator, and it reserves nothing. That is a deliberate departure from the suggestion to
+record on the first screen: doing so would let anyone burn the shared hourly budget just by loading
+the form, making the very denial of service the cap already risks strictly worse.
+
+Verified over HTTP against a disposable instance: the gate first refuses on the 11th wrong keyword
+and not before; a correct keyword is held while the budget is spent and opens the vault again once
+the interval elapses; the AJAX path receives `{ok:false, err:…}`; an action carrying no keyword is
+never gated; and exactly 5 of 8 sign-up attempts succeed with no row left behind by a refusal.
+
 ## 2026-09-06
 
 ### Added

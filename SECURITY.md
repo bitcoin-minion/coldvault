@@ -255,9 +255,16 @@ Ranked by how much they should worry you.
    and use `tools/kwcheck.php --explain` for the methodology.
 
 6. **The sign-up throttle is site-wide.** `REG_MAX_PER_HOUR` counts registrations across
-   the whole instance, because no per-address counter exists. So a sign-up flood can block
-   new registrations for an hour. Accepted trade for storing nothing identifying; close the
-   registration page once your accounts exist.
+   the whole instance, because no per-address counter exists. So a sign-up flood can still
+   block new registrations for an hour. Accepted trade for storing nothing identifying; close
+   the registration page once your accounts exist.
+   Since 2026-09-08 the cap is at least **actually enforced**: it used to be checked when the
+   sign-up form was submitted and only recorded once the account was created, so sessions
+   staged past that check could be completed afterwards and exceed it, and two simultaneous
+   completions could both pass a read-then-act count. A slot is now claimed atomically at the
+   moment of creation. The check on the first screen is advisory only and reserves nothing, so
+   an abandoned sign-up costs the instance nothing — which matters precisely because the cap is
+   shared.
 
 7. **A guest cannot rotate their own keyword.** The keyword-change path runs through the
    owner-only save function. Workaround: the owner removes and re-invites them — which
