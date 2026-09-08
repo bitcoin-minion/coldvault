@@ -46,12 +46,23 @@ error_reporting(0);
 // The keyword is the encryption key, so it must never cross cleartext HTTP.
 // LOCAL_MODE (see env.php) is the only way past this, and only for development.
 // ============================================================================
+// 2026-09-07 (security review): the forwarded-protocol header is honoured ONLY when
+// TRUST_FORWARDED_PROTO is enabled (a proxy you control terminates TLS). Otherwise a client
+// could send `X-Forwarded-Proto: https` over plain HTTP and turn the HTTPS gate off.
 $vault_https = (!empty($_SERVER['HTTPS']) && strtolower($_SERVER['HTTPS']) !== 'off')
     || (isset($_SERVER['SERVER_PORT']) && (int)$_SERVER['SERVER_PORT'] === 443)
-    || (isset($_SERVER['HTTP_X_FORWARDED_PROTO']) && strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https');
+    || (TRUST_FORWARDED_PROTO
+        && isset($_SERVER['HTTP_X_FORWARDED_PROTO'])
+        && strtolower(trim(explode(',', $_SERVER['HTTP_X_FORWARDED_PROTO'])[0])) === 'https');
 if (!$vault_https && !LOCAL_MODE) {
-    if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST') { http_response_code(403); exit('HTTPS required.'); }
-    header('Location: https://' . $_SERVER['HTTP_HOST'] . $_SERVER['REQUEST_URI']);
+    // Do a scheme-upgrading redirect only to a host we can trust. The client Host header (and
+    // Apache's SERVER_NAME, which mirrors it under the default UseCanonicalName Off) are attacker-
+    // controlled, so reflecting either enables an open redirect / 301 cache poisoning. Redirect
+    // only to a configured CANONICAL_HOST; with none set, refuse rather than reflect. In the
+    // documented topology the Apache HTTP->HTTPS redirect runs before this anyway.
+    $cv_redir_host = (CANONICAL_HOST !== '' && preg_match('/^[A-Za-z0-9.\-]+(:[0-9]{1,5})?$/', CANONICAL_HOST)) ? CANONICAL_HOST : '';
+    if (($_SERVER['REQUEST_METHOD'] ?? '') === 'POST' || $cv_redir_host === '') { http_response_code(403); exit('HTTPS required.'); }
+    header('Location: https://' . $cv_redir_host . ($_SERVER['REQUEST_URI'] ?? '/'));
     exit;
 }
 

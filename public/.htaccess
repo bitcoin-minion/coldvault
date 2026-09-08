@@ -9,9 +9,17 @@
 
 RewriteEngine On
 
+# 2026-09-07 (security review): redirect to %{SERVER_NAME}, not the client-supplied %{HTTP_HOST},
+# so this 301 (which is cacheable) cannot be pointed at an attacker host. For this to be the
+# configured name rather than a mirror of the Host header, set in the vhost:
+#     ServerName your.domain
+#     UseCanonicalName On
+# The X-Forwarded-Proto condition below lets a TLS-terminating proxy avoid a redirect loop; the
+# app itself only TRUSTS that header when TRUST_FORWARDED_PROTO=1 (see config.php), so a spoofed
+# header that slips past this rule is still rejected by PHP.
 RewriteCond %{HTTPS} !=on
 RewriteCond %{HTTP:X-Forwarded-Proto} !=https
-RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [R=301,L]
+RewriteRule ^ https://%{SERVER_NAME}%{REQUEST_URI} [R=301,L]
 
 # Clean URL — /register/ serves the register screen.
 RewriteRule ^register/?$ index.php?screen=register [L,QSA]

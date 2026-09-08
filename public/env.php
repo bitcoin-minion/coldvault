@@ -70,3 +70,14 @@ if (!defined('LOCAL_MODE')) define('LOCAL_MODE', cv_env_bool('LOCAL_MODE'));
 
 // The label an authenticator app shows for accounts on this instance.
 if (!defined('OTP_ISSUER')) define('OTP_ISSUER', cv_env('OTP_ISSUER', 'Coldvault'));
+
+// 2026-09-07 (security review): only trust a forwarded protocol header when TLS is terminated by
+// a proxy IN FRONT of this app. Left OFF, a client cannot send `X-Forwarded-Proto: https` over
+// plain HTTP to satisfy the HTTPS gate. Set to 1 only when a reverse proxy / load balancer that
+// you control terminates TLS and forwards the request.
+if (!defined('TRUST_FORWARDED_PROTO')) define('TRUST_FORWARDED_PROTO', cv_env_bool('TRUST_FORWARDED_PROTO'));
+
+// Optional canonical hostname used when building the HTTP->HTTPS redirect target, so the raw
+// client Host header is not reflected into a redirect (open-redirect / cache poisoning). If empty,
+// the redirect uses the server-configured name where available, else a sanitised Host.
+if (!defined('CANONICAL_HOST')) define('CANONICAL_HOST', cv_env('CANONICAL_HOST', ''));
