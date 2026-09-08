@@ -33,13 +33,14 @@ So:
 |---|---|
 | Stolen database dump | **Yes.** Ciphertext only. No phrase, no keyword. |
 | Stolen filesystem backup | **Yes**, unless it also contains `coldvault.env` — and even then, no phrase. |
-| Database credentials leaked | **Yes.** Same as a dump. |
+| Database credentials leaked (read) | **Yes.** Ciphertext only, same as a dump. |
+| Database *write* access | Phrases stay sealed. Account takeover by transplanting credentials is blocked: APP_KEY blobs and backup-code hashes are bound to their row. |
 | `APP_KEY` leaked | **Yes, for phrases.** Accounts become impersonable; phrases stay sealed. |
 | Someone with your keyword | No. That is the key. |
 | An attacker who can edit `index.php` | **No.** Twenty lines capture every keyword typed after that. |
 | An attacker with root, or with the PHP process' memory | **No.** |
 | A malicious operator of the instance | **No.** |
-| Network attacker on the wire | Yes, via TLS. HTTPS is enforced, not suggested. |
+| Network attacker on the wire | Yes, via TLS. HTTPS is enforced server-side; a forwarded-protocol header is trusted only when `TRUST_FORWARDED_PROTO` is set for a proxy you run. |
 
 **Run your own instance.** Every design decision here assumes the operator and the owner
 are the same person. Using someone else's Coldvault means trusting them with your coins as
@@ -142,13 +143,18 @@ moving the funds is the only real remedy. The UI states this rather than implyin
 - 15-minute idle timeout, `session_regenerate_id(true)` on login, cookie
   `Secure; HttpOnly; SameSite=Strict`.
 - TOTP replay is blocked by recording the last accepted step.
-- **No lockout on the sign-in path, by design.** Evaluating a code is the only way to tell
-  the owner from an attacker, so any cap on evaluations caps the owner too — a 5-strike
-  lockout let anyone who knew a username hold that account shut indefinitely. A CAPTCHA
-  gate keyed to the server-side failure count does the rate-limiting instead: state a
-  client cannot clear by dropping its cookie, applied identically to unknown usernames so
-  the requirement itself reveals nothing. `lock_until` still brakes the step-up path, which
-  requires an already-authenticated session.
+- **No hard lockout on the sign-in path, by design.** Evaluating a code is the only way to
+  tell the owner from an attacker, so a hard cap caps the owner too — a 5-strike lockout let
+  anyone who knew a username hold that account shut indefinitely. Two limiters do the
+  rate-limiting instead, both keyed to server-side state a client cannot clear by dropping
+  its cookie, and both applied identically to unknown usernames so the requirement reveals
+  nothing: a CAPTCHA gate after a few failures, and a per-account evaluation **budget**
+  (`vault_login_throttle`) that, once spent, throttles further guesses to one every so often
+  **without ever fully locking the account** — the owner always keeps getting attempts.
+  `lock_until` brakes the step-up path (which needs an authenticated session) and is armed
+  only by step-up failures, never by sign-in failures, so an outsider cannot trip it.
+- **The sign-in response is identical for a known and an unknown username** (same message,
+  same CAPTCHA path), so it does not enumerate accounts.
 - **A tarpit was considered and rejected.** Sleeping requests do not survive parallel
   connections, and a handful of concurrent sleepers would pin the PHP worker pool — trading
   a per-account denial of service for a site-wide one.
@@ -173,8 +179,10 @@ moving the funds is the only real remedy. The UI states this rather than implyin
   `Permissions-Policy` denying 23 browser APIs the app never uses.
 - **Injection:** prepared statements throughout. The only interpolated values are
   `(int)`-cast integers.
-- **Output:** server-side escaping plus client-side `.value` / `.textContent` — never
-  `innerHTML`. A vault name containing `<script>` renders as text.
+- **Output:** every user-controlled value is written with server-side escaping and, in the
+  browser, via `.value` / `.textContent`. A vault name containing `<script>` renders as text.
+  The few `innerHTML` writes in the page assign only constant or numeric markup (a spinner, a
+  QR matrix, a strength meter), never a secret or a user-supplied string.
 - **The phrase never exists inside an HTML document.** It is fetched over an authenticated
   request and written into inputs by script. So no history entry, no resubmittable POST,
   and nothing for reload, back-forward or crash-restore to replay. There is deliberately no

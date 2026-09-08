@@ -98,14 +98,15 @@ See [SECURITY.md](SECURITY.md) for the full threat model and the known residual 
 - Authenticator secrets are encrypted at rest under `APP_KEY`, so a database dump cannot
   generate valid codes.
 - Eight single-use backup codes, shown once, stored only as hashes.
-- Self-hosted CAPTCHA: no external calls, and the answer is never present as text in the
-  markup. Falls back to an SVG pixel grid when GD is unavailable.
+- Self-hosted CAPTCHA: no external calls, and the answer exists only as pixels in a GD image,
+  never as text in the markup. GD (with FreeType) is required.
 - Pairing a new authenticator **signs out every other live session**, and there is an
   explicit "sign out everywhere else" control.
-- A correct code always signs you in. There is deliberately no lockout on the sign-in
+- A correct code always signs you in. There is deliberately no hard lockout on the sign-in
   path — a cap on attempts caps the real owner too, so anyone who knew a username could
-  hold that account shut. A CAPTCHA gate keyed to server-side failure count does the
-  rate-limiting instead.
+  hold that account shut. A CAPTCHA gate plus a per-account evaluation budget that never fully
+  locks the account do the rate-limiting instead, and the response is identical for known and
+  unknown usernames so it does not enumerate accounts.
 
 **Sharing**
 - The owner issues a **one-time invite code** (~120 bits, 72-hour default TTL). Only its
@@ -293,7 +294,7 @@ Behavioural tunables are constants at the top of `public/config.php` and
 |---|---|---|
 | `VAULT_ITER` | `450000` | PBKDF2 iterations for new and re-saved vaults. Existing vaults keep their own count, so raising this is always safe. |
 | `MIN_KEYSLOT_BITS` | `65` | Entropy floor for any keyword that opens a vault. |
-| `INVITE_TTL_HOURS` | `72` | Invite lifetime. It is a full key to the vault while it lives. |
+| `INVITE_TTL_HOURS` | `72` | Invite lifetime. It is a full key to the vault while it lives; expired unredeemed invites are purged from the database, not just hidden. |
 | `INVITE_MAX_FAILS` | `10` | Wrong attempts before an invite burns out. |
 | `SEED_LENGTHS` | `12,15,18,20,21,24,33` | Accepted phrase lengths. |
 | `AUTH_IDLE` | `900` | Session idle timeout, in seconds. |
