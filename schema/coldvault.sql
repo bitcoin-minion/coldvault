@@ -198,22 +198,44 @@ CREATE TABLE IF NOT EXISTS `vault_reg_throttle` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- ---------------------------------------------------------------------------
--- vault_login_throttle — per-account sign-in rate limiting (2026-09-07, security review).
+-- vault_login_throttle — all rate-limit state (2026-09-07, extended 2026-09-08).
 --
--- One timestamp per code EVALUATION, keyed by the attempted username_lc (which is
--- server-side state a client cannot clear by dropping its cookie). It bounds an
--- attacker to LOGIN_MAX_PER_HOUR code guesses per account per hour, then a slow
--- trickle - but it NEVER fully locks the account: the owner is always allowed at
--- least one attempt every LOGIN_THROTTLE_INTERVAL seconds, so unlike the old
--- five-strike lock an outsider cannot hold a known username shut. The same rule is
--- applied whether or not the username exists, so it reveals nothing about existence.
--- Rows older than an hour are purged lazily on each attempt. No client IP is stored.
+-- One row per event. FIVE namespaces share username_lc, and they must stay disjoint:
+--
+--   u:<name>            sign-in budget - LOGIN_MAX_PER_HOUR code evaluations per hour
+--   b:<bucket>:<name>   per-client reserve, honoured when the u: budget is spent
+--   f:<name>            sign-in FAILURES; drives the CAPTCHA (AUTH_CAPTCHA_AFTER)
+--   kw:<uid>            wrong keywords - the keyword-guessing brake
+--   w:<uid>             keyword WORK, charged whatever the outcome - the cost brake
+--
+-- Rows older than an hour are purged lazily on each attempt, so this table stays small
+-- and forgets quickly. That is deliberate: it is a rate limiter, not an audit log.
+--
+-- ⚠️ 2026-09-08 (second independent review): the note that used to sit here claimed this
+-- design meant "an outsider cannot hold a known username shut". THAT WAS WRONG, and it is
+-- worth recording why, because it reads so plausibly. Once the hourly budget was spent,
+-- each further attempt required LOGIN_THROTTLE_INTERVAL to have elapsed since the NEWEST
+-- row - a clock shared by everyone submitting that username. Polling once a minute kept it
+-- permanently fresh and won every race against a human filling in a form, so a known
+-- account could be held shut indefinitely for about sixty requests an hour. Making it a
+-- hard hourly lock is no better: the window slides, so it is simply re-spent each hour.
+-- The b: namespace is the fix - capacity an attacker who knows the username cannot spend.
+--
+-- NO CLIENT IP IS STORED. <bucket> is 16 bits of HMAC over the address under a key that
+-- rotates every hour and is derived from APP_KEY (which lives outside the database), so
+-- roughly 65,000 addresses share each value and two hours' buckets cannot be correlated.
+-- Key rotation, truncation and the hourly purge are all load-bearing; see auth.php.
+--
+-- The f: namespace exists because the CAPTCHA trigger used to read vault_users.fail_count,
+-- which only exists for accounts that DO exist - so the trigger enumerated accounts. These
+-- rows are recorded for any attempted name, so both cases cross the threshold together.
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS `vault_login_throttle` (
   `username_lc` varchar(64) NOT NULL,
   `ts` datetime NOT NULL,
   KEY `k_lc_ts` (`username_lc`,`ts`),
   KEY `k_ts` (`ts`)
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+  COMMENT = 'Rate-limit state. Five namespaces share username_lc, all self-purging after 1 hour: "u:<name>" sign-in budget; "b:<bucket>:<name>" per-client reserve, because a budget keyed on a username alone is a denial of service - anyone knowing the name can keep its clock fresh; "f:<name>" sign-in failures, which drive the CAPTCHA and are recorded whether or not the account exists, so the trigger cannot enumerate accounts; "kw:<uid>" wrong keywords; "w:<uid>" keyword work, charged whatever the outcome, because the expensive requests are the ones that succeed. NO CLIENT IP IS STORED: <bucket> is 16 bits of HMAC over the address under an hourly-rotating key derived from APP_KEY, so ~65k addresses share each value and two hours cannot be correlated. Keep the prefixes disjoint. See auth.php.';
 
 SET FOREIGN_KEY_CHECKS = 1;

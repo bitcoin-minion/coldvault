@@ -157,6 +157,13 @@ Several of these are worse than code bugs, because a reader follows them.
   `Fluffy2019` (60 → **37** bits, in two places — the estimator rewrite changed it and the prose
   did not follow), and the requirement table, which called `gd` "optional with an SVG fallback"
   after that fallback had been deleted as decodable, and listed `mbstring` under "not needed".
+- **The `vault_login_throttle` schema comment described one namespace where there are now five**,
+  and repeated the falsified claim that the design meant "an outsider cannot hold a known username
+  shut". Both the SQL prose and a new table `COMMENT` now list all five namespaces, record why that
+  claim was wrong, and state plainly that no client IP is stored and how the per-client bucket is
+  derived without one. Applied to a running instance with `ALGORITHM=INPLACE, LOCK=NONE`, so it
+  needs no downtime; on a fresh install it comes from the schema. Purely descriptive either way —
+  no column, index or row is affected.
 - `.gitignore` now covers the suffixes the documentation itself asks operators to create
   (`*.backup`, `*.previous`, `*.save`, `coldvault.env.*`), kept in step with the deny list.
 
