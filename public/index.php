@@ -11,7 +11,7 @@ require __DIR__ . '/auth.php';     // 2026-09-01: TOTP gate (replaces HTTP Basic
 //   Defined HERE rather than in config.php on purpose: most updates replace index.php and
 //   nothing else, so a constant living in config.php would keep reporting the old version
 //   after an update. Bump this whenever a release changes this file.
-define('CV_VERSION', '2026-09-06');
+define('CV_VERSION', '2026-09-08');
 
 // 2026-09-06: opaque references for anything identified by an AUTO_INCREMENT row id.
 //   Vault, keyslot, invite and user ids are sequential, so putting one into a form told

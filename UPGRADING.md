@@ -12,7 +12,7 @@ machine with `LOCAL_MODE=1`.
 ## Which version am I running?
 
 Sign in and open **Account security** from the header. Near the top it shows **App version**
-followed by a date, for example `2026-09-06`. Compare that with the newest entry in
+followed by a date, for example `2026-09-08`. Compare that with the newest entry in
 [CHANGELOG.md](CHANGELOG.md) to see whether there is anything to apply.
 
 > If you see **no version line at all**, you are running the initial release from
@@ -20,7 +20,7 @@ followed by a date, for example `2026-09-06`. Compare that with the newest entry
 
 ---
 
-## The security-review release (2026-09-07)
+## The security-review release (2026-09-08)
 
 This release hardens authentication, transport, and denial-of-service handling. It replaces
 `public/index.php`, `public/auth.php`, `public/config.php`, `public/env.php`, `public/captcha.php`,

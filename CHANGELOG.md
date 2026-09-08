@@ -6,7 +6,7 @@ There are no release tags yet, so each entry describes the state of `main` on th
 
 ---
 
-## 2026-09-07 — security review
+## 2026-09-08 — security review
 
 A pass of hardening changes from an independent review. **Requires one new database table**
 (`vault_login_throttle`) **and one new index** (`vault_invite.k_expires`), plus optionally two new
