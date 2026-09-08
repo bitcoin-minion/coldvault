@@ -29,9 +29,29 @@ define('REG_MAX_PER_HOUR', 5);
 // OTP_ISSUER — the label your authenticator app shows — comes from the
 // configuration file. See env.php and coldvault.env.example.
 
-// ---- APP_KEY encryption for the stored TOTP secret ----
-function ak_encrypt($p){ $n=random_bytes(12);$t='';$c=openssl_encrypt($p,'aes-256-gcm',APP_KEY,OPENSSL_RAW_DATA,$n,$t,'coldvault-auth',16);return $c===false?false:$n.$t.$c; }
-function ak_decrypt($b){ if(strlen($b)<28)return false;return openssl_decrypt(substr($b,28),'aes-256-gcm',APP_KEY,OPENSSL_RAW_DATA,substr($b,0,12),substr($b,12,16),'coldvault-auth'); }
+// ---- APP_KEY encryption for the stored TOTP secret and other APP_KEY-protected blobs ----
+// 2026-09-07 (security review): the AAD now carries a per-row CONTEXT, so a blob encrypted for
+//   one account/column cannot be transplanted onto another and still decrypt. Forging any blob
+//   needs APP_KEY (to make the GCM tag), and every new blob is context-bound, so a database-write
+//   attacker can no longer copy their own authenticator secret or backup-code rows onto a victim.
+//   ak_decrypt falls back to the pre-review constant AAD so blobs written by older code still open;
+//   because forging requires APP_KEY and freshly written blobs are always bound, that fallback
+//   cannot be abused to re-enable the transplant. New writes should always pass $ctx.
+function ak_aad($ctx){ return ($ctx === '') ? 'coldvault-auth' : 'coldvault-auth:'.$ctx; }
+function ak_encrypt($p,$ctx=''){ $n=random_bytes(12);$t='';$c=openssl_encrypt($p,'aes-256-gcm',APP_KEY,OPENSSL_RAW_DATA,$n,$t,ak_aad($ctx),16);return $c===false?false:$n.$t.$c; }
+function ak_decrypt($b,$ctx=''){
+    if(strlen($b)<=28)return false;                                  // 28 = nonce(12)+tag(16); reject empty ciphertext
+    $n=substr($b,0,12);$t=substr($b,12,16);$c=substr($b,28);
+    $p=openssl_decrypt($c,'aes-256-gcm',APP_KEY,OPENSSL_RAW_DATA,$n,$t,ak_aad($ctx));
+    if($p===false && $ctx!=='') $p=openssl_decrypt($c,'aes-256-gcm',APP_KEY,OPENSSL_RAW_DATA,$n,$t,ak_aad(''));  // legacy row written before context binding
+    return $p;
+}
+// Context strings for each APP_KEY-protected column. Kept short and stable.
+function ak_ctx_secret($lc){ return 's:u:'.strtolower(trim($lc)); }     // TOTP secret_blob, bound to username_lc
+function ak_ctx_name($ownerUid){ return 'n:u:'.(int)$ownerUid; }        // vault.name_enc, bound to the owner
+// Keyslot and invite labels share one per-vault context: an invite's label_enc ciphertext is
+// copied verbatim into the new keyslot on redemption, so both must decrypt under the same AAD.
+function ak_ctx_label($vid){ return 'l:v:'.(int)$vid; }
 
 // ---- base32 (RFC 4648) ----
 function base32_encode($d){ $a='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';$o='';$b=0;$v=0;for($i=0;$i<strlen($d);$i++){$v=($v<<8)|ord($d[$i]);$b+=8;while($b>=5){$o.=$a[($v>>($b-5))&31];$b-=5;}}if($b>0)$o.=$a[($v<<(5-$b))&31];return $o; }
@@ -68,36 +88,80 @@ function auth_uname(){ return $_SESSION['cv_uname'] ?? ''; }
 function username_valid($u){ return (bool)preg_match('/^[A-Za-z0-9_.-]{3,32}$/',$u); }
 function user_find($con,$username){ $lc=strtolower(trim($username));$s=mysqli_prepare($con,"SELECT * FROM vault_users WHERE username_lc=? LIMIT 1");mysqli_stmt_bind_param($s,'s',$lc);mysqli_stmt_execute($s);$r=mysqli_stmt_get_result($s);return $r?mysqli_fetch_assoc($r):null; }
 function user_exists($con,$username){ return user_find($con,$username)!==null; }
-function user_secret($row){ return ($row&&!empty($row['secret_blob']))?ak_decrypt($row['secret_blob']):false; }
+function user_secret($row){ return ($row&&!empty($row['secret_blob']))?ak_decrypt($row['secret_blob'],ak_ctx_secret($row['username_lc']??'')):false; }
+// Decrypt a blob under the BOUND context only (no legacy fallback). Used to detect a legacy
+// row so it can be re-encrypted context-bound on next use.
+function ak_decrypt_bound($b,$ctx){
+    if(strlen($b)<=28)return false;
+    return openssl_decrypt(substr($b,28),'aes-256-gcm',APP_KEY,OPENSSL_RAW_DATA,substr($b,0,12),substr($b,12,16),ak_aad($ctx));
+}
+// True if this account's secret_blob is still under the legacy (unbound) AAD.
+function user_secret_is_legacy($row){
+    if(!$row||empty($row['secret_blob']))return false;
+    return ak_decrypt_bound($row['secret_blob'],ak_ctx_secret($row['username_lc']??''))===false
+        && user_secret($row)!==false;
+}
+// Re-encrypt a legacy secret_blob under the bound context (idempotent; skips already-bound rows).
+function user_migrate_secret($con,$row){
+    if(!user_secret_is_legacy($row))return;
+    $sec=user_secret($row); if($sec===false)return;
+    $blob=ak_encrypt($sec,ak_ctx_secret($row['username_lc']??'')); if($blob===false)return;
+    $s=mysqli_prepare($con,"UPDATE vault_users SET secret_blob=? WHERE id=?");
+    if($s){mysqli_stmt_bind_param($s,'si',$blob,$row['id']);mysqli_stmt_execute($s);}
+}
 function user_locked($row){ if($row&&!empty($row['lock_until'])&&strtotime($row['lock_until'])>time())return strtotime($row['lock_until'])-time();return 0; }
 function user_register($con,$username,$secretRaw,$codes){
-    $blob=ak_encrypt($secretRaw);if($blob===false)return false;$lc=strtolower(trim($username));
+    $lc=strtolower(trim($username));
+    $blob=ak_encrypt($secretRaw,ak_ctx_secret($lc));if($blob===false)return false;
+    // 2026-09-07 (security review): the account row and its backup codes are now written in one
+    //   transaction with every statement checked, so a mid-registration failure cannot leave an
+    //   account that exists but has fewer codes than the user was shown (a later lockout).
+    if(!mysqli_begin_transaction($con))return false;
     $s=mysqli_prepare($con,"INSERT INTO vault_users (username,username_lc,secret_blob,enrolled_at,fail_count) VALUES (?,?,?,NOW(),0)");
+    if(!$s){mysqli_rollback($con);return false;}
     mysqli_stmt_bind_param($s,'sss',$username,$lc,$blob);
-    if(!@mysqli_stmt_execute($s))return false;               // UNIQUE race -> false
+    if(!@mysqli_stmt_execute($s)){mysqli_rollback($con);return false;}   // UNIQUE race -> false
     $uid=mysqli_insert_id($con);
     $ins=mysqli_prepare($con,"INSERT INTO vault_backup_codes (user_id,code_hash) VALUES (?,?)");
-    foreach($codes as $c){$h=bc_hash($c);mysqli_stmt_bind_param($ins,'is',$uid,$h);mysqli_stmt_execute($ins);}
+    if(!$ins){mysqli_rollback($con);return false;}
+    foreach($codes as $c){$h=bc_hash($c,$uid);mysqli_stmt_bind_param($ins,'is',$uid,$h);if(!mysqli_stmt_execute($ins)){mysqli_rollback($con);return false;}}
+    mysqli_commit($con);
     return $uid;
 }
-function user_fail($con,$uid){
+// 2026-09-07 (security review): $armLock defaults false so the SIGN-IN path can bump the failure
+//   counter (which drives the CAPTCHA requirement) WITHOUT arming lock_until. Only the step-up
+//   path passes true. Previously a wrong sign-in armed lock_until too, letting an outsider who
+//   knew a username keep the owner's account-security controls (sign-out-others, re-pair, revoke)
+//   permanently "Too many attempts" - a denial of exactly the incident-response tools.
+function user_fail($con,$uid,$armLock=false){
     mysqli_query($con,"UPDATE vault_users SET fail_count=fail_count+1 WHERE id=".(int)$uid);
+    if(!$armLock)return;
     $s=mysqli_prepare($con,"SELECT fail_count FROM vault_users WHERE id=?");mysqli_stmt_bind_param($s,'i',$uid);mysqli_stmt_execute($s);$r=mysqli_stmt_get_result($s);$row=$r?mysqli_fetch_assoc($r):null;
-    // 2026-09-03: fail_count is NO LONGER zeroed when the lock is applied. It is now the
-    //   durable signal that makes the sign-in form demand a human check after
-    //   AUTH_CAPTCHA_AFTER wrong codes, so clearing it every few failures would have
-    //   handed an attacker a fresh free run each time round. A successful sign-in still
-    //   clears it - see user_success().
+    // fail_count is NOT zeroed when the lock is applied; it is the durable signal behind the
+    // CAPTCHA requirement. A successful sign-in or step-up clears it - see user_success().
     if($row&&(int)$row['fail_count']>=AUTH_MAX_FAILS){$u=date('Y-m-d H:i:s',time()+AUTH_LOCK_SECS);$q=mysqli_prepare($con,"UPDATE vault_users SET lock_until=? WHERE id=?");mysqli_stmt_bind_param($q,'si',$u,$uid);mysqli_stmt_execute($q);}
 }
-function user_success($con,$uid,$step){ $s=mysqli_prepare($con,"UPDATE vault_users SET fail_count=0,lock_until=NULL,last_step=? WHERE id=?");mysqli_stmt_bind_param($s,'ii',$step,$uid);mysqli_stmt_execute($s); }
+// 2026-09-07 (security review): last_step is advanced with a compare-and-set (only moves forward),
+//   so two concurrent submissions of the same code cannot both record it as newly accepted.
+function user_success($con,$uid,$step){ $s=mysqli_prepare($con,"UPDATE vault_users SET fail_count=0,lock_until=NULL,last_step=? WHERE id=? AND (last_step IS NULL OR last_step < ?)");mysqli_stmt_bind_param($s,'iii',$step,$uid,$step);mysqli_stmt_execute($s); }
 
 // ---- backup codes (per user; hashed with APP_KEY pepper; single-use) ----
+// 2026-09-07 (security review): the HMAC input now includes the user id, so a code-hash row copied
+//   onto another account by a database-write attacker no longer verifies there. bc_verify_consume
+//   also accepts the legacy (unbound) hash so codes issued by older code still work, and consumes
+//   atomically (UPDATE ... WHERE used_at IS NULL + affected_rows) so the same code cannot be spent
+//   twice by two concurrent requests.
 function bc_norm($c){ return strtoupper(preg_replace('/[^A-Za-z0-9]/','',$c)); }
-function bc_hash($c){ return hash_hmac('sha256',bc_norm($c),APP_KEY); }
+function bc_hash($c,$uid){ return hash_hmac('sha256',(int)$uid.':'.bc_norm($c),APP_KEY); }
+function bc_hash_legacy($c){ return hash_hmac('sha256',bc_norm($c),APP_KEY); }
 function bc_verify_consume($con,$uid,$code){
-    $h=bc_hash($code);$s=mysqli_prepare($con,"SELECT id FROM vault_backup_codes WHERE user_id=? AND code_hash=? AND used_at IS NULL LIMIT 1");mysqli_stmt_bind_param($s,'is',$uid,$h);mysqli_stmt_execute($s);$r=mysqli_stmt_get_result($s);$row=$r?mysqli_fetch_assoc($r):null;
-    if(!$row)return false;$u=mysqli_prepare($con,"UPDATE vault_backup_codes SET used_at=NOW() WHERE id=?");mysqli_stmt_bind_param($u,'i',$row['id']);mysqli_stmt_execute($u);return true;
+    $h=bc_hash($code,$uid);$hl=bc_hash_legacy($code);
+    $s=mysqli_prepare($con,"SELECT id FROM vault_backup_codes WHERE user_id=? AND code_hash IN (?,?) AND used_at IS NULL LIMIT 1");
+    mysqli_stmt_bind_param($s,'iss',$uid,$h,$hl);mysqli_stmt_execute($s);$r=mysqli_stmt_get_result($s);$row=$r?mysqli_fetch_assoc($r):null;
+    if(!$row)return false;
+    $u=mysqli_prepare($con,"UPDATE vault_backup_codes SET used_at=NOW() WHERE id=? AND used_at IS NULL");
+    mysqli_stmt_bind_param($u,'i',$row['id']);mysqli_stmt_execute($u);
+    return mysqli_stmt_affected_rows($u)===1;   // lost a concurrent race -> code already spent
 }
 
 // ---- account security: step-up re-auth + re-enrollment (2026-09-01) ----
@@ -113,7 +177,7 @@ function auth_stepup_check($con,$uid,$code){
     $step=($secret!==false)?totp_verify($secret,$code,time(),1):false;
     if($step!==false&&$step>$last){ user_success($con,$uid,$step); return ''; }
     if(bc_verify_consume($con,$uid,$code)) return '';
-    user_fail($con,$uid);
+    user_fail($con,$uid,true);   // step-up path DOES arm lock_until (needs an authenticated session)
     return 'That code did not match. If you just signed in with this code, wait for the next one - each code works only once. Otherwise use a fresh 6-digit code, or an unused backup code.';
 }
 // Swap in a new TOTP secret. Only called after the NEW app has proved it produces valid codes.
@@ -122,7 +186,8 @@ function auth_stepup_check($con,$uid,$code){
 //   caller can re-stamp the session it is running in - otherwise pairing a new
 //   authenticator would sign you out of the very device you just used to do it.
 function user_set_secret($con,$uid,$secretRaw){
-    $blob=ak_encrypt($secretRaw); if($blob===false)return false;
+    $r=user_by_id($con,$uid); if(!$r) return false;
+    $blob=ak_encrypt($secretRaw,ak_ctx_secret($r['username_lc'])); if($blob===false)return false;   // context-bound
     $s=mysqli_prepare($con,"UPDATE vault_users SET secret_blob=?,secret_version=secret_version+1,last_step=NULL,fail_count=0,lock_until=NULL,enrolled_at=NOW() WHERE id=?");
     mysqli_stmt_bind_param($s,'si',$blob,$uid);
     return mysqli_stmt_execute($s) ? user_secret_version($con,$uid) : false;
@@ -137,12 +202,17 @@ function user_bump_secret_version($con,$uid){
     return mysqli_query($con,"UPDATE vault_users SET secret_version=secret_version+1 WHERE id=".(int)$uid)
         ? user_secret_version($con,$uid) : false;
 }
-// Replace ALL backup codes (used and unused) with a fresh single-use set.
+// Replace ALL backup codes (used and unused) with a fresh single-use set, atomically.
 function user_replace_backup_codes($con,$uid,$codes){
-    $d=mysqli_prepare($con,"DELETE FROM vault_backup_codes WHERE user_id=?");mysqli_stmt_bind_param($d,'i',$uid);
-    if(!mysqli_stmt_execute($d))return false;
+    if(!mysqli_begin_transaction($con))return false;
+    $d=mysqli_prepare($con,"DELETE FROM vault_backup_codes WHERE user_id=?");
+    if(!$d){mysqli_rollback($con);return false;}
+    mysqli_stmt_bind_param($d,'i',$uid);
+    if(!mysqli_stmt_execute($d)){mysqli_rollback($con);return false;}
     $ins=mysqli_prepare($con,"INSERT INTO vault_backup_codes (user_id,code_hash) VALUES (?,?)");
-    foreach($codes as $c){$h=bc_hash($c);mysqli_stmt_bind_param($ins,'is',$uid,$h);if(!mysqli_stmt_execute($ins))return false;}
+    if(!$ins){mysqli_rollback($con);return false;}
+    foreach($codes as $c){$h=bc_hash($c,$uid);mysqli_stmt_bind_param($ins,'is',$uid,$h);if(!mysqli_stmt_execute($ins)){mysqli_rollback($con);return false;}}
+    mysqli_commit($con);
     return true;
 }
 

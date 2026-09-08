@@ -109,7 +109,7 @@ function vault_list_for($con, $uid) {
     while ($res && ($r = mysqli_fetch_assoc($res))) {
         $r['name'] = '';
         if ($r['name_enc'] !== null && $r['name_enc'] !== '') {
-            $d = ak_decrypt($r['name_enc']);
+            $d = ak_decrypt($r['name_enc'], ak_ctx_name($r['owner_id']));
             if ($d !== false) $r['name'] = $d;
         }
         unset($r['name_enc']);
@@ -174,7 +174,7 @@ function vault_upgrade_v2($con, $vid, $uid, $kw, $payload) {
     if ($body === false || $slot === false)      return false;
     if (v_unwrap($slot, $kw) !== $dek)           return false;   // self-check the wrap
     if (v_decrypt_dek($body, $dek) !== $payload) return false;   // self-check the payload
-    $label = ak_encrypt('owner');
+    $label = ak_encrypt('owner', ak_ctx_label($vid));
     if ($label === false)                        return false;
 
     $ok = false;
@@ -477,7 +477,7 @@ function vault_keyslots($con, $vid) {
     mysqli_stmt_execute($st);
     $res = mysqli_stmt_get_result($st); $out = [];
     while ($res && ($r = mysqli_fetch_assoc($res))) {
-        $r['label'] = ak_decrypt($r['label_enc']);
+        $r['label'] = ak_decrypt($r['label_enc'], ak_ctx_label($vid));
         if ($r['label'] === false) $r['label'] = '(unreadable)';
         unset($r['label_enc']);
         $out[] = $r;
@@ -498,7 +498,7 @@ function vault_invites_pending($con, $vid) {
     mysqli_stmt_execute($st);
     $res = mysqli_stmt_get_result($st); $out = [];
     while ($res && ($r = mysqli_fetch_assoc($res))) {
-        $r['label'] = ak_decrypt($r['label_enc']);
+        $r['label'] = ak_decrypt($r['label_enc'], ak_ctx_label($vid));
         if ($r['label'] === false) $r['label'] = '(unreadable)';
         unset($r['label_enc']);
         $out[] = $r;
@@ -929,8 +929,11 @@ if (!auth_is_logged_in($con)) {
         }
         // $row is the pre-login snapshot, so read the version back rather than trusting it:
         // a backup code was possibly just consumed, but the version cannot have moved.
-        if ($ok) { $_SESSION['cv_login_fails'] = 0; $dest = auth_after_login_url(); auth_login_user($uid, $row['username'], user_secret_version($con, $uid)); header('Location: ' . $dest); exit; }
-        if ($row) user_fail($con, $row['id']);
+        if ($ok) {
+            user_migrate_secret($con, $row);   // re-encrypt a legacy (unbound) secret_blob context-bound, on first login after upgrade
+            $_SESSION['cv_login_fails'] = 0; $dest = auth_after_login_url(); auth_login_user($uid, $row['username'], user_secret_version($con, $uid)); header('Location: ' . $dest); exit;
+        }
+        if ($row) user_fail($con, $row['id']);   // sign-in failure bumps the CAPTCHA counter but no longer arms lock_until (see user_fail)
         $_SESSION['cv_login_fails'] = ($_SESSION['cv_login_fails'] ?? 0) + 1;
         render_login('Invalid username or code.', true, $u); exit;
     }
@@ -1437,7 +1440,7 @@ if ($action === 'invite_create') {
     if ((int)$row['format'] !== 2)    { render_invite_form($vid, $label, 'This vault is not on the shared-capable format yet. Unlock it once to upgrade it, then try again.'); exit; }
     $code = invite_new_code();
     $wrap = v_wrap($open[1], $code, VAULT_ITER);
-    $lab  = ak_encrypt($label);
+    $lab  = ak_encrypt($label, ak_ctx_label($vid));
     if ($wrap === false || $lab === false || v_unwrap($wrap, $code) !== $open[1]) { render_invite_form($vid, $label, 'Self-check failed; no invite was created.'); exit; }
     $hash = invite_hash($code); $ttl = (int)INVITE_TTL_HOURS;
     $i = mysqli_prepare($con, "INSERT INTO vault_invite (vault_id,created_by,code_hash,label_enc,iterations,salt,nonce,tag,wrapped_dek,expires_at) VALUES (?,?,?,?,?,?,?,?,?, DATE_ADD(NOW(), INTERVAL ? HOUR))");
@@ -1477,7 +1480,7 @@ if ($action === 'create') {
         $rec = v_encrypt($payload, $kw, VAULT_ITER);
         if ($rec === false) $err = 'Encryption failed.';
         else {
-            $nenc = ($vname !== '') ? ak_encrypt($vname) : null;
+            $nenc = ($vname !== '') ? ak_encrypt($vname, ak_ctx_name($__uid)) : null;
             $stmt = mysqli_prepare($con, "INSERT INTO vault (user_id,iterations,salt,nonce,tag,ciphertext,name_enc) VALUES (?,?,?,?,?,?,?)");
             mysqli_stmt_bind_param($stmt, 'iisssss', $__uid, $rec['iter'], $rec['salt'], $rec['nonce'], $rec['tag'], $rec['ct'], $nenc);
             if (mysqli_stmt_execute($stmt)) {
@@ -1590,7 +1593,7 @@ elseif ($action === 'update') {
                 // rename is owner-only, like every other change to a vault
                 $vname = trim((string)($_POST['vname'] ?? ''));
                 if ($vname === '' || preg_match('/^[\pL\pN ._\-]{1,40}$/u', $vname)) {
-                    $nenc = ($vname !== '') ? ak_encrypt($vname) : null;
+                    $nenc = ($vname !== '') ? ak_encrypt($vname, ak_ctx_name($__uid)) : null;
                     // 2026-09-03: AND user_id=? added. It cannot change the outcome here -
                     //   the owner check above already proved $__uid owns $vid, and owner_id
                     //   IS vault.user_id - but every other write in this file carries its
