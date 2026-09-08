@@ -191,7 +191,7 @@ has to survive into a second request.
 | Optional | `gd` with FreeType — enables the raster CAPTCHA. Without it the SVG fallback is used automatically. |
 | **Web server** | Apache 2.4 with `mod_rewrite` and `mod_headers`, and `AllowOverride All` for the document root. |
 | **Database** | MySQL 8.0+ or MariaDB 10.4+. |
-| **HTTPS** | Required on any reachable host — the app refuses to serve over plain HTTP, because the keyword *is* the encryption key. A host that already has a certificate needs **no extra configuration**; it also accepts `X-Forwarded-Proto: https` behind a proxy or CDN. **You do not need a certificate to try it locally:** see below. |
+| **HTTPS** | Required on any reachable host — the app refuses to serve over plain HTTP, because the keyword *is* the encryption key. A host that already has a certificate needs **no extra configuration**; it also accepts `X-Forwarded-Proto: https` behind a proxy or CDN once `TRUST_FORWARDED_PROTO=1` is set. **You do not need a certificate to try it locally:** see below. |
 
 Not needed: `mbstring`, `curl`, `intl`, Composer, Node, any build step.
 

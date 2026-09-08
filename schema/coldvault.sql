@@ -150,6 +150,7 @@ CREATE TABLE `vault_invite` (
   UNIQUE KEY `u_code` (`code_hash`),
   KEY `k_vault` (`vault_id`),
   KEY `fk_inv_user` (`created_by`),
+  KEY `k_expires` (`expires_at`),
   CONSTRAINT `fk_inv_vault` FOREIGN KEY (`vault_id`)   REFERENCES `vault` (`id`) ON DELETE CASCADE,
   CONSTRAINT `fk_inv_user`  FOREIGN KEY (`created_by`) REFERENCES `vault_users` (`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -201,7 +202,8 @@ CREATE TABLE `vault_reg_throttle` (
 CREATE TABLE `vault_login_throttle` (
   `username_lc` varchar(64) NOT NULL,
   `ts` datetime NOT NULL,
-  KEY `k_lc_ts` (`username_lc`,`ts`)
+  KEY `k_lc_ts` (`username_lc`,`ts`),
+  KEY `k_ts` (`ts`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 SET FOREIGN_KEY_CHECKS = 1;

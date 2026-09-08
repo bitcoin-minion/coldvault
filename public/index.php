@@ -252,9 +252,19 @@ function vault_transfer_owner($con, $row, $actorUid, $newOwnerUid) {
 
     $ok = false;
     if (mysqli_begin_transaction($con)) do {   // 2026-09-07 (security review): skip the block if the txn could not start
-        $u = mysqli_prepare($con, "UPDATE vault SET user_id=? WHERE id=? AND user_id=?");
+        // 2026-09-07 (follow-up review): name_enc is bound to the OWNER's id (ak_ctx_name), so the name
+        //   must be re-encrypted under the new owner in the same transaction or it becomes
+        //   unreadable to everyone the moment user_id changes. Decrypt under the old owner (legacy
+        //   unbound rows fall back inside ak_decrypt); a name that will not open is cleared rather
+        //   than carried across as a blob nobody can read.
+        $newName = null;
+        if ($row['name_enc'] !== null && $row['name_enc'] !== '') {
+            $plain = ak_decrypt($row['name_enc'], ak_ctx_name($actorUid));
+            if ($plain !== false && $plain !== '') { $newName = ak_encrypt($plain, ak_ctx_name($newOwnerUid)); if ($newName === false) break; }
+        }
+        $u = mysqli_prepare($con, "UPDATE vault SET user_id=?, name_enc=? WHERE id=? AND user_id=?");
         if (!$u) break;
-        mysqli_stmt_bind_param($u, 'iii', $newOwnerUid, $vid, $actorUid);
+        mysqli_stmt_bind_param($u, 'isii', $newOwnerUid, $newName, $vid, $actorUid);
         if (!mysqli_stmt_execute($u) || mysqli_stmt_affected_rows($u) !== 1) break;
         $d = mysqli_prepare($con, "DELETE FROM vault_invite WHERE vault_id=? AND used_at IS NULL");
         if (!$d) break;
@@ -944,7 +954,10 @@ if (!auth_is_logged_in($con)) {
         if ($row) {
             $secret = user_secret($row); $last = ($row['last_step'] !== null) ? (int)$row['last_step'] : -1;
             $step = ($secret !== false) ? totp_verify($secret, $code, time(), 1) : false;
-            if ($step !== false && $step > $last) { user_success($con, $row['id'], $step); $ok = true; $uid = $row['id']; }
+            // user_success() is a compare-and-set on last_step; it returns false when another request
+            // already consumed this step, so the loser of a same-code race is a FAILED attempt, not a
+            // second session (2026-09-07, follow-up review).
+            if ($step !== false && $step > $last && user_success($con, $row['id'], $step)) { $ok = true; $uid = $row['id']; }
             elseif (bc_verify_consume($con, $row['id'], $code)) { $ok = true; $uid = $row['id']; }
         }
         // $row is the pre-login snapshot, so read the version back rather than trusting it:
@@ -972,7 +985,8 @@ $__uid = (int)auth_uid();
 //   code. Expiry was only a SELECT filter, so an unredeemed, uncancelled invite kept that wrapped
 //   key in the database forever - a leaked "expired" code plus a backup then still opened the vault.
 //   Purge expired, unredeemed invites at rest on each authenticated request, the way the sign-up
-//   throttle self-purges. Cheap (indexed) and bounded.
+//   throttle self-purges. Bounded and index-driven: k_expires on vault_invite(expires_at) serves
+//   the range predicate, so this stays O(rows purged) rather than a scan of the whole table.
 mysqli_query($con, "DELETE FROM vault_invite WHERE used_at IS NULL AND expires_at < NOW()");
 
 /* ===== 2026-09-06: opaque references -> row ids. ONE translation for every POST =====

@@ -311,7 +311,10 @@ sudo certbot renew --dry-run
 ```
 
 **Behind a reverse proxy or load balancer that terminates TLS?** Make sure it forwards
-`X-Forwarded-Proto: https`, which `config.php` checks. Without it you get a redirect loop.
+`X-Forwarded-Proto: https`, **and** set `TRUST_FORWARDED_PROTO=1` in `coldvault.env` so
+`config.php` will honour that header (it is ignored by default, because otherwise any client
+could send it over plain HTTP). Without both you get `403 HTTPS required.`, or a redirect loop
+if `CANONICAL_HOST` is set.
 
 ---
 
@@ -485,10 +488,20 @@ apache2ctl -M | grep -E 'rewrite|headers'
 
 ### Redirect loop
 
-TLS is terminated upstream and `X-Forwarded-Proto: https` is not reaching PHP. Fix it at
-the proxy. Do **not** work around it by enabling `LOCAL_MODE`.
+TLS is terminated upstream and `X-Forwarded-Proto: https` is not reaching PHP, or it is
+arriving but `TRUST_FORWARDED_PROTO` is not set so PHP ignores it. Fix it at the proxy and in
+`coldvault.env`. Do **not** work around it by enabling `LOCAL_MODE`.
 
-### `HTTPS required.` on form submission
+### `HTTPS required.` on every page
+
+PHP believes the request arrived over plain HTTP and no `CANONICAL_HOST` is configured, so it
+refuses rather than redirect to an attacker-controllable `Host`. Behind a proxy this is the
+same cause as the redirect loop above: forward `X-Forwarded-Proto: https` and set
+`TRUST_FORWARDED_PROTO=1`. On a direct Apache install, make sure the vhost actually serves
+HTTPS. Optionally set `CANONICAL_HOST=your.host.name` if you want the app to redirect plain
+HTTP itself instead of refusing it.
+
+### `HTTPS required.` on form submission only
 
 The POST arrived over plain HTTP. Check the form is being served from the `https://` URL
 and that no upstream is downgrading it.
@@ -543,7 +556,7 @@ raising it is always safe, and existing vaults keep the count stored on their ow
 >
 > The app accepts any signal a real host provides: `HTTPS=on`, `HTTPS=1`, `SERVER_PORT`
 > 443, or `X-Forwarded-Proto: https` when TLS is terminated by a proxy, load balancer or
-> CDN in front of it. `LOCAL_MODE` exists only for `localhost`, where obtaining a
+> CDN in front of it and `TRUST_FORWARDED_PROTO=1` is set. `LOCAL_MODE` exists only for `localhost`, where obtaining a
 > certificate is awkward — **never** as a way to run a public instance without one.
 
 HTTPS is enforced on any reachable host, but you have two ways to run it on your own
@@ -671,5 +684,6 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 365 \
 ```
 
 **Behind a TLS-terminating proxy instead?** `config.php` also accepts
-`X-Forwarded-Proto: https`, so a local Caddy, Traefik or nginx in front of `php -S` works
-with `LOCAL_MODE` off — provided the proxy actually sets that header.
+`X-Forwarded-Proto: https` once `TRUST_FORWARDED_PROTO=1` is set, so a local Caddy, Traefik or
+nginx in front of `php -S` works with `LOCAL_MODE` off — provided the proxy actually sets that
+header.

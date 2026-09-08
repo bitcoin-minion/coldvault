@@ -84,7 +84,9 @@ if (!defined('OTP_ISSUER')) define('OTP_ISSUER', cv_env('OTP_ISSUER', 'Coldvault
 // you control terminates TLS and forwards the request.
 if (!defined('TRUST_FORWARDED_PROTO')) define('TRUST_FORWARDED_PROTO', cv_env_bool('TRUST_FORWARDED_PROTO'));
 
-// Optional canonical hostname used when building the HTTP->HTTPS redirect target, so the raw
-// client Host header is not reflected into a redirect (open-redirect / cache poisoning). If empty,
-// the redirect uses the server-configured name where available, else a sanitised Host.
+// Canonical hostname (optionally host:port) used as the HTTP->HTTPS redirect target, so the raw
+// client Host header is never reflected into a redirect (open-redirect / cache poisoning). If
+// empty, a plain-HTTP request is REFUSED with 403 "HTTPS required." rather than redirected. That
+// is harmless where Apache already redirects HTTP to HTTPS before PHP runs (the documented
+// setup); set it if you rely on the app itself to perform the upgrade redirect.
 if (!defined('CANONICAL_HOST')) define('CANONICAL_HOST', cv_env('CANONICAL_HOST', ''));

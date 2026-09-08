@@ -24,29 +24,44 @@ followed by a date, for example `2026-09-06`. Compare that with the newest entry
 
 This release hardens authentication, transport, and denial-of-service handling. It replaces
 `public/index.php`, `public/auth.php`, `public/config.php`, `public/env.php`, `public/captcha.php`,
-`public/style.css`, and adds **one new database table**.
+`public/style.css`, adds **one new database table**, and adds **one index** to an existing table.
 
 | | |
 |---|---|
-| Database change needed? | **Yes — one new table.** Run the statement below (or re-apply `schema/coldvault.sql`, which is additive). |
-| New setting in `coldvault.env`? | **Optional.** `TRUST_FORWARDED_PROTO=1` only if TLS is terminated by a proxy in front of this app; leave it unset for a direct-to-Apache/cPanel install. |
+| Database change needed? | **Yes — one new table and one new index.** Run the statements below (or re-apply `schema/coldvault.sql`, which is additive for the table; the index must be added by hand on an existing install). |
+| New setting in `coldvault.env`? | **Optional, two.** `TRUST_FORWARDED_PROTO=1` only if TLS is terminated by a proxy in front of this app. `CANONICAL_HOST` only if you want the app itself to redirect plain HTTP to HTTPS (see below). Leave both unset for a direct-to-Apache/cPanel install. |
 | Do I have to re-enter my `APP_KEY`? | **No.** Never re-generate it. Existing authenticator secrets, labels and backup codes keep working; secrets are re-encrypted in a stronger form automatically on each account's next sign-in. |
 
-Apply the new table (safe to run once; it stores no client IP):
+Apply the new table and the new index (safe to run once; the table stores no client IP):
 
 ```sql
 CREATE TABLE `vault_login_throttle` (
   `username_lc` varchar(64) NOT NULL,
   `ts` datetime NOT NULL,
-  KEY `k_lc_ts` (`username_lc`,`ts`)
+  KEY `k_lc_ts` (`username_lc`,`ts`),
+  KEY `k_ts` (`ts`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+ALTER TABLE `vault_invite` ADD KEY `k_expires` (`expires_at`);
 ```
 
-If your host serves the app **without a TLS-terminating proxy** (Apache/cPanel talking HTTPS
-directly), do nothing extra. If a proxy terminates TLS and forwards to this app, set
-`TRUST_FORWARDED_PROTO=1` in `coldvault.env` so the HTTPS check still works; otherwise the app
-now ignores a client-supplied `X-Forwarded-Proto` header (that header could previously be used to
-bypass the HTTPS requirement).
+Both indexes exist so the housekeeping this release adds stays cheap: expired invites are now
+purged on every authenticated request, and stale throttle rows on every sign-in attempt. Without
+`k_expires` and `k_ts` those deletes would scan their whole table each time. If you applied an
+earlier build of this release that created `vault_login_throttle` without `k_ts`, add it with
+`ALTER TABLE vault_login_throttle ADD KEY k_ts (ts);`.
+
+**HTTPS and proxies.** If your host serves the app **without a TLS-terminating proxy**
+(Apache/cPanel talking HTTPS directly), do nothing extra. If a proxy terminates TLS and forwards
+to this app, set `TRUST_FORWARDED_PROTO=1` in `coldvault.env` so the HTTPS check still works;
+otherwise the app now ignores a client-supplied `X-Forwarded-Proto` header (that header could
+previously be used to bypass the HTTPS requirement).
+
+**Plain-HTTP requests now get `403 HTTPS required.` instead of a redirect** unless you set
+`CANONICAL_HOST` (for example `CANONICAL_HOST=vault.example.com`). The old behaviour redirected to
+whatever `Host` the client sent, which is an open-redirect and cache-poisoning vector. In the
+documented setup Apache redirects HTTP to HTTPS before PHP ever runs, so most installs will never
+see the 403. Set `CANONICAL_HOST` only if you relied on the app to perform that redirect.
 
 **Backup codes:** codes issued before this release keep working, but for the full anti-tampering
 benefit, sign in and regenerate them once from **Account security**.

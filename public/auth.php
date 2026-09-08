@@ -151,7 +151,11 @@ function user_fail($con,$uid,$armLock=false){
 }
 // 2026-09-07 (security review): last_step is advanced with a compare-and-set (only moves forward),
 //   so two concurrent submissions of the same code cannot both record it as newly accepted.
-function user_success($con,$uid,$step){ $s=mysqli_prepare($con,"UPDATE vault_users SET fail_count=0,lock_until=NULL,last_step=? WHERE id=? AND (last_step IS NULL OR last_step < ?)");mysqli_stmt_bind_param($s,'iii',$step,$uid,$step);mysqli_stmt_execute($s); }
+// Compare-and-set on last_step. Returns TRUE only if THIS call advanced it; a concurrent request
+// that already recorded the same step gets FALSE, and callers must treat that as a failed attempt.
+// Without the return value the guard only stopped the row being overwritten twice - both racers
+// still signed in on one code (2026-09-07, follow-up review).
+function user_success($con,$uid,$step){ $s=mysqli_prepare($con,"UPDATE vault_users SET fail_count=0,lock_until=NULL,last_step=? WHERE id=? AND (last_step IS NULL OR last_step < ?)");if(!$s)return false;mysqli_stmt_bind_param($s,'iii',$step,$uid,$step);if(!mysqli_stmt_execute($s))return false;return mysqli_stmt_affected_rows($s)===1; }
 
 // ---- backup codes (per user; hashed with APP_KEY pepper; single-use) ----
 // 2026-09-07 (security review): the HMAC input now includes the user id, so a code-hash row copied
@@ -183,7 +187,7 @@ function auth_stepup_check($con,$uid,$code){
     $w=user_locked($row); if($w>0) return "Too many attempts - wait {$w}s.";
     $secret=user_secret($row); $last=($row['last_step']!==null)?(int)$row['last_step']:-1;
     $step=($secret!==false)?totp_verify($secret,$code,time(),1):false;
-    if($step!==false&&$step>$last){ user_success($con,$uid,$step); return ''; }
+    if($step!==false&&$step>$last&&user_success($con,$uid,$step)) return '';   // CAS lost -> fall through as a failure
     if(bc_verify_consume($con,$uid,$code)) return '';
     user_fail($con,$uid,true);   // step-up path DOES arm lock_until (needs an authenticated session)
     return 'That code did not match. If you just signed in with this code, wait for the next one - each code works only once. Otherwise use a fresh 6-digit code, or an unused backup code.';

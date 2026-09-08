@@ -9,7 +9,8 @@ There are no release tags yet, so each entry describes the state of `main` on th
 ## 2026-09-07 — security review
 
 A pass of hardening changes from an independent review. **Requires one new database table**
-(`vault_login_throttle`) and optionally two new settings — see [UPGRADING.md](UPGRADING.md).
+(`vault_login_throttle`) **and one new index** (`vault_invite.k_expires`), plus optionally two new
+settings (`TRUST_FORWARDED_PROTO`, `CANONICAL_HOST`) — see [UPGRADING.md](UPGRADING.md).
 Existing authenticator secrets, labels and backup codes keep working; do not regenerate `APP_KEY`.
 
 ### Fixed (high severity)
@@ -40,11 +41,27 @@ Existing authenticator secrets, labels and backup codes keep working; do not reg
 
 ### Fixed (lower severity / hardening)
 
-- Redirects use a canonical/server name rather than the client `Host`; `<Files>` and a root
-  `.htaccess` deny direct access to config/secret files; errors are suppressed at the earliest
-  include; backup-code consumption and TOTP replay are race-safe; a guest sees only their own row
-  in the sharing panel; `last_used_at` is now recorded; JSON embedded in scripts carries the
-  `JSON_HEX_*` flags; the pending re-pair secret is cleared on cancel and expires.
+- The HTTP->HTTPS redirect goes only to a configured `CANONICAL_HOST`, never to the client
+  `Host`; with none configured a plain-HTTP request is refused (403) rather than redirected.
+  `<Files>` and a root `.htaccess` deny direct access to config/secret files; errors are
+  suppressed at the earliest include; backup-code consumption and TOTP replay are race-safe; a
+  guest sees only their own row in the sharing panel; `last_used_at` is now recorded; JSON embedded
+  in scripts carries the `JSON_HEX_*` flags; the pending re-pair secret is cleared on cancel and
+  expires.
+
+### Fixed after a second review of this release
+
+- **Transferring a vault no longer blanks its name.** Vault names are now encrypted bound to the
+  owner's account; the transfer path changed the owner but left the name encrypted for the old
+  one, so it became unreadable to everybody. The name is re-encrypted for the new owner inside
+  the transfer transaction.
+- **A sign-in code can no longer produce two sessions.** Two requests carrying the same valid
+  6-digit code at the same instant both signed in; the compare-and-set on the last-used step now
+  reports whether it won, and the loser is treated as a failed attempt. The same check applies to
+  the account-security step-up.
+- Indexes added for the two new housekeeping deletes (`vault_invite.expires_at`,
+  `vault_login_throttle.ts`) so they do not scan their tables on every request.
+- `CANONICAL_HOST` documentation now matches the code (refuse, do not reflect).
 
 ## 2026-09-06
 
