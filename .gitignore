@@ -21,6 +21,22 @@ logs/
 *.orig
 *.rej
 *~
+
+# 2026-09-08 (second independent review): the suffixes the docs themselves tell operators to
+# create. UPGRADING.md asks for a copy of the configuration and of index.php before updating, and
+# a "coldvault.env.backup" sitting in the tree was BOTH committable and, on a shared host,
+# web-servable. The docs now say to keep those outside the project entirely - this is the second
+# line of defence for when someone does it here anyway. Keep in step with the FilesMatch deny
+# list in public/.htaccess.
+*.backup
+*.previous
+*.save
+*.old
+*.copy
+*.tmp
+*.temp
+coldvault.env.*
+!coldvault.env.example
 .DS_Store
 Thumbs.db
 .idea/

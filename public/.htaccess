@@ -41,7 +41,17 @@ Options -Indexes
 <FilesMatch "^(config|env|auth|crypto)\.php$">
   Require all denied
 </FilesMatch>
-<FilesMatch "\.(env|sql|sql\.gz|dump|bak|orig|log|md)$|^\.">
+# 2026-09-08 (second independent review, CRITICAL): the list below used to end at "bak", so a file
+# named coldvault.env.backup was SERVED - and UPGRADING.md told operators to create exactly that,
+# while the shared-hosting instructions had them protect only the literal name "coldvault.env". Two
+# individually reasonable documents published APP_KEY and the database password between them. Both
+# are fixed, and this pattern is now written to catch the SHAPE rather than a list of extensions:
+# anything containing ".env" anywhere in the name, and any editor/backup/copy suffix. An extension
+# allow-list would be safer still, but this file has to keep serving whatever assets are added
+# later, so match the hazards broadly and re-check when adding an asset type.
+# ⚠️ When you add a suffix to this list, add it to the root .htaccess reasoning too, and remember
+#   that the REAL protection is keeping secrets outside the document root - not this rule.
+<FilesMatch "(^|\.)env($|\.)|\.(sql|sql\.gz|dump|bak|bak[0-9]*|backup|old|orig|save|swp|swo|tmp|temp|log|md|inc|ini|pem|key|crt|sqlite|db|tar|tar\.gz|tgz|zip|7z|rar)$|~$|^\.|\.(previous|copy|dist|sample|example)$">
   Require all denied
 </FilesMatch>
 

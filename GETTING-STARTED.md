@@ -412,20 +412,51 @@ Some cheap plans lock document roots inside `public_html`. That is workable but 
 because you are now relying on a rule being right rather than on the file being out of
 reach.
 
-Put the app at `public_html/coldvault/`, set the subdomain's document root to
-`public_html/coldvault/public`, and then create a file called `.htaccess` **inside**
-`public_html/coldvault/` containing exactly:
+Put the app at `public_html/coldvault/` and set the subdomain's document root to
+`public_html/coldvault/public`.
+
+> ⚠️ **2026-09-08 — this section used to be dangerously wrong. If you followed it before,
+> re-read it now.** It told you to create `.htaccess` inside `public_html/coldvault/`
+> "containing exactly" a rule that denied the single filename `coldvault.env`. Two things were
+> wrong with that. First, `public_html/coldvault/` **is the project root, which already ships
+> its own `.htaccess` denying everything** — so following the old instruction *replaced* a
+> deny-all with a deny-one. Second, denying one exact filename protects one exact filename:
+> [UPGRADING.md](UPGRADING.md) tells you to keep a copy of your configuration before updating,
+> and a file named `coldvault.env.backup` was **not** covered by that rule. Anyone could then
+> fetch `https://yoursite.com/coldvault/coldvault.env.backup` and read your `APP_KEY` and your
+> database password in plain text. The old test step — load `coldvault.env` and check for
+> *Forbidden* — passed while that hole was wide open, which made it worse than no test.
+
+**Do not create or replace `.htaccess` in `public_html/coldvault/`.** The project ships one
+there already, and it denies the whole directory:
 
 ```apache
-<Files "coldvault.env">
-    Require all denied
-</Files>
-Options -Indexes
+Require all denied
 ```
 
-Then **test it** — visit `https://yoursite.com/coldvault/coldvault.env` and confirm you get
-a *Forbidden* error and not your key. If you see the key, do not proceed; ask your host for
-a docroot outside `public_html`, or use a different host.
+Confirm it survived the upload — some FTP clients and file managers skip dotfiles silently:
+
+```bash
+cat public_html/coldvault/.htaccess
+```
+
+If it is missing, create it with exactly the two lines above (`Require all denied`, plus
+`Options -Indexes` if you like). Never narrow it to a single `<Files>` name.
+
+Then **test it properly** — all four of these must return *Forbidden* or *Not Found*, and none
+may show you a key, a password, or a file listing:
+
+```
+https://yoursite.com/coldvault/coldvault.env
+https://yoursite.com/coldvault/coldvault.env.backup
+https://yoursite.com/coldvault/tools/
+https://yoursite.com/coldvault/
+```
+
+If **any** of them returns content, stop and do not put a real recovery phrase in this
+installation. Ask your host for a document root outside `public_html`, or use a different host.
+Keeping configuration backups outside the web tree entirely (see UPGRADING.md) is the other
+half of this: a rule you have to get right is weaker than a file the web server cannot reach.
 
 ---
 
@@ -440,7 +471,7 @@ them. What follows is what those steps *are for*, so you are not typing commands
 | [1. Packages](INSTALL.md#1-install-the-packages) | Installs the four pieces: Apache (serves web pages), PHP (runs this app), MariaDB (stores the data), certbot (gets a free HTTPS certificate). |
 | [2. Get the code](INSTALL.md#2-get-the-code) | Downloads the project to `/var/www/coldvault`. The `public` sub-folder is the only part the web ever sees. |
 | [3. Database](INSTALL.md#3-create-the-database) | Creates an empty database plus a login that can reach *only* it — so leaked credentials open nothing else. |
-| [4. Import](INSTALL.md#4-import-the-structure) | Creates the six tables. The database is empty until you do this. |
+| [4. Import](INSTALL.md#4-import-the-structure) | Creates the seven tables. The database is empty until you do this. |
 | [5. APP_KEY + config](INSTALL.md#5-generate-an-app_key-and-write-the-configuration) | Generates the key that protects logins, and writes it with the database password into `coldvault.env`. **Back this file up here, not later.** |
 | [6. Permissions](INSTALL.md#6-file-ownership-and-permissions) | Makes `coldvault.env` readable by PHP and by nothing else. On a VPS this is `640` with a group change — **not** the `600` that cPanel needs. |
 | [7. Apache](INSTALL.md#7-configure-apache) | Tells Apache which domain serves this and from which folder. `DocumentRoot` **must** end in `/public`, or you publish your own secrets. |
@@ -629,7 +660,7 @@ Same for every path.
 4. Choose your **keyword**. This is the password that encrypts this vault.
 
    The form will refuse anything too weak, and tells you as you type. The bar needs to reach
-   about **65 bits**. To put that in perspective: `Fluffy2019` scores 60 and is **rejected**.
+   about **65 bits**. To put that in perspective: `Fluffy2019` scores 37 and is **rejected**.
    A four-word phrase like `correct-horse-battery-staple` scores 44 and is **rejected**.
 
    > **Press Generate.** It produces a random seven-word phrase which is both far stronger
@@ -678,7 +709,7 @@ which part is broken. Check these in order:
    `youracct_coldvault`, not `coldvault`. This is the second most common cause.
 4. **Is the database password right?** Test it by logging in to phpMyAdmin with that
    username and password.
-5. **Did the import actually run?** The database must contain six tables. An empty database
+5. **Did the import actually run?** The database must contain seven tables. An empty database
    gives this same message.
 6. **Are the permissions right?** `0600` on cPanel. `0640` with the right group on a VPS.
 

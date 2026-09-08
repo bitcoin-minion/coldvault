@@ -104,9 +104,15 @@ See [SECURITY.md](SECURITY.md) for the full threat model and the known residual 
   explicit "sign out everywhere else" control.
 - A correct code always signs you in. There is deliberately no hard lockout on the sign-in
   path — a cap on attempts caps the real owner too, so anyone who knew a username could
-  hold that account shut. A CAPTCHA gate plus a per-account evaluation budget that never fully
-  locks the account do the rate-limiting instead, and the response is identical for known and
-  unknown usernames so it does not enumerate accounts.
+  hold that account shut. A CAPTCHA gate plus a per-account evaluation budget do the
+  rate-limiting instead, and the response is identical for known and unknown usernames so it
+  does not enumerate accounts.
+  A per-account budget is not sufficient on its own, which took a second review to see: once
+  the hourly allowance is spent, waiting on "time since the last attempt" means waiting on a
+  clock *anyone* submitting that username can keep fresh. So attempts past the budget fall
+  through to a small **per-client reserve** an attacker cannot spend — see
+  [SECURITY.md](SECURITY.md) for how that client bucket is derived without recording an
+  address.
 
 **Sharing**
 - The owner issues a **one-time invite code** (~120 bits, 72-hour default TTL). Only its
@@ -241,7 +247,12 @@ mysql -u coldvault -p coldvault < schema/coldvault.sql
 
 # 2. Configuration, outside the document root
 cp coldvault.env.example coldvault.env
-chmod 600 coldvault.env
+# 2026-09-08: 640 + a group change, NOT 600. This quick start ends with an Apache vhost, so
+# PHP runs as www-data and a root-owned 600 file is unreadable to it - the app would start up
+# and report "Vault temporarily unavailable". Use 600 only where PHP runs as your own user,
+# which is the cPanel case. INSTALL.md step 6 has both.
+sudo chown root:www-data coldvault.env
+sudo chmod 640 coldvault.env
 php tools/genkey.php          # paste the APP_KEY line into coldvault.env
 $EDITOR coldvault.env         # then fill in DB_USER / DB_PASS
 

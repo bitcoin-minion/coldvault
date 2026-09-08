@@ -121,6 +121,45 @@ they were wrong, rather than quietly deleted, because the reasoning error is the
   bug on any host missing the extension. All three copies of the estimator (server PHP, browser
   twin, `tools/kwcheck.php`) now agree on all 423 candidates of the parity corpus.
 
+### Documentation and packaging (same review)
+
+Several of these are worse than code bugs, because a reader follows them.
+
+- **CRITICAL: two documents combined to publish `APP_KEY` and the database password.** The
+  shared-hosting appendix told operators to create an `.htaccess` "containing exactly" a rule
+  denying the single filename `coldvault.env` — in the project root, which **already ships an
+  `.htaccess` denying the whole directory**, so following the instruction *replaced* a deny-all
+  with a deny-one. `UPGRADING.md` then said `cp coldvault.env coldvault.env.backup`, and that
+  filename was not the protected one, so it was served on request. The appendix's own test step
+  (fetch `coldvault.env`, expect *Forbidden*) passed the whole time, which made it worse than no
+  test. Fixed on all three sides: the appendix now says never to replace the shipped file and
+  lists four URLs to test, `UPGRADING.md` keeps backups outside the tree, and the deny pattern in
+  `public/.htaccess` matches the *shape* of a backup rather than a list of extensions.
+- **`schema/coldvault.sql` was described as "additive" and was not.** Every `CREATE TABLE` lacked
+  `IF NOT EXISTS`, so re-applying it aborted on the first existing table, part-way through. All
+  seven now carry `IF NOT EXISTS`. Re-running it is still not an upgrade mechanism — it skips an
+  existing table even when its columns are stale — and that is now stated in the file.
+- **The quick start's `chmod 600` broke the install it was describing.** It ends with an Apache
+  vhost, where PHP runs as `www-data`, so a root-owned `600` configuration file is unreadable and
+  the app reports "Vault temporarily unavailable". Now `chown root:www-data` plus `640`, with the
+  cPanel case (`600`, PHP as your own user) called out. `INSTALL.md` always had this right.
+- **The install verification told you to expect the wrong status codes**, then contradicted itself
+  in the prose below: `404` in the instruction, "an empty 200" in the explanation, and `403` in
+  reality, because `public/.htaccess` denies those files by name. A `200` there means
+  `AllowOverride All` is not in effect and *no* protection in that file is either — which is now
+  what it says. Also adds checks for the backup filenames, both required extensions, and the
+  table count.
+- **The security-header list did not say the headers are `.htaccess`-dependent.** Without
+  `mod_headers` or `AllowOverride All`, Apache drops the whole block silently and the app cannot
+  tell. HSTS especially: its absence is invisible in normal use. `SECURITY.md` now says so and
+  gives the one-line check. Setting them from PHP instead is recorded as a known gap.
+- Corrected the table count (six → **seven**, in two places), the documented strength of
+  `Fluffy2019` (60 → **37** bits, in two places — the estimator rewrite changed it and the prose
+  did not follow), and the requirement table, which called `gd` "optional with an SVG fallback"
+  after that fallback had been deleted as decodable, and listed `mbstring` under "not needed".
+- `.gitignore` now covers the suffixes the documentation itself asks operators to create
+  (`*.backup`, `*.previous`, `*.save`, `coldvault.env.*`), kept in step with the deny list.
+
 ### Known limitations, stated deliberately
 
 - The keyword entropy estimator charges a repeated or sequential letter run as a run rather than a

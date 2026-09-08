@@ -71,7 +71,7 @@ screen warns you before you do it.
 **Entropy floor**
 The minimum keyword strength the app will accept — about **65 bits** by default. A shared
 vault is only as strong as its weakest keyword, so this stops one person choosing something
-soft. For scale: `Fluffy2019` measures 60 and is rejected; the **Generate** button produces
+soft. For scale: `Fluffy2019` measures 37 and is rejected; the **Generate** button produces
 about 84.
 
 **`LOCAL_MODE`**

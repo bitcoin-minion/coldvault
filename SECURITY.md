@@ -183,6 +183,13 @@ moving the funds is the only real remedy. The UI states this rather than implyin
 - **Headers:** HSTS, `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`,
   `Referrer-Policy: no-referrer`, `X-Robots-Tag: noindex`, `Cache-Control: no-store`,
   `Permissions-Policy` denying 23 browser APIs the app never uses.
+  ⚠️ **These come from `public/.htaccess`, so they are only as present as `mod_headers` and
+  `AllowOverride All` are.** If either is missing, Apache ignores the whole block *silently* —
+  no error, no warning, and the app cannot tell. HSTS in particular is worth confirming rather
+  than assuming, since its absence is invisible in normal use: check with
+  `curl -sI https://yourhost/ | grep -i strict-transport`. The app does not set these from PHP,
+  which would make them independent of Apache configuration; that is a known gap, not a
+  decision.
 - **Injection:** prepared statements throughout. The only interpolated values are
   `(int)`-cast integers.
 - **Output:** every user-controlled value is written with server-side escaping and, in the

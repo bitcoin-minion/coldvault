@@ -87,7 +87,7 @@ This release hardens authentication, transport, and denial-of-service handling. 
 
 | | |
 |---|---|
-| Database change needed? | **Yes — one new table and one new index.** Run the statements below (or re-apply `schema/coldvault.sql`, which is additive for the table; the index must be added by hand on an existing install). |
+| Database change needed? | **Yes — one new table and one new index.** Run the statements below. (Re-applying `schema/coldvault.sql` also works *as of 2026-09-08*, when every `CREATE TABLE` gained `IF NOT EXISTS`; before that it aborted on the first table that already existed. It still only creates MISSING tables and never alters an existing one, so it is not an upgrade mechanism — the index below must be added by hand either way.) |
 | New setting in `coldvault.env`? | **Optional, two.** `TRUST_FORWARDED_PROTO=1` only if TLS is terminated by a proxy in front of this app. `CANONICAL_HOST` only if you want the app itself to redirect plain HTTP to HTTPS (see below). Leave both unset for a direct-to-Apache/cPanel install. |
 | Do I have to re-enter my `APP_KEY`? | **No.** Never re-generate it. Existing authenticator secrets, labels and backup codes keep working. (This entry used to say secrets were re-encrypted "automatically on each account's next sign-in". That path was removed on 2026-09-08 — see the second-review release above, which replaces it with `tools/migrate-aad.php`.) |
 
@@ -151,9 +151,21 @@ surprise into an inconvenience.
 **1. Your configuration file.** This holds your `APP_KEY`, and losing it locks every account
 out of the app permanently:
 
+Copy it **outside the project directory**, and ideally off the server altogether:
+
+```bash
+cp coldvault.env ~/coldvault.env.backup     # NOT inside the project, NOT inside the web root
+chmod 600 ~/coldvault.env.backup
 ```
-cp coldvault.env coldvault.env.backup
-```
+
+> ⚠️ **2026-09-08 — this step used to say `cp coldvault.env coldvault.env.backup`, which put the
+> copy next to the original.** That is safe when the document root is `public/`, as it should be —
+> but on a shared host where the project sits inside `public_html`, it was not. The old
+> [A11 instructions](GETTING-STARTED.md#a11-if-your-host-will-not-allow-a-docroot-outside-public_html)
+> had you protect the single filename `coldvault.env`, so a file called `coldvault.env.backup`
+> was served on request: `APP_KEY` and the database password, in plain text, to anyone who asked.
+> A11 has been corrected too. Keep the backup out of the tree regardless — a copy the web server
+> cannot reach beats a rule you have to get right.
 
 > ⚠️ **Never generate a new `APP_KEY` as part of an update.** It is not a password you can
 > rotate freely: it encrypts your authenticator secrets, your backup codes and your invite
@@ -198,7 +210,7 @@ cp coldvault-main/public/index.php /path/to/your/coldvault/public/index.php
 Keep the file you replaced. If anything looks wrong, putting it back is your rollback:
 
 ```
-cp public/index.php public/index.php.previous     # before overwriting
+cp public/index.php ~/index.php.previous          # before overwriting - keep it OUTSIDE public/
 ```
 
 ---
@@ -219,7 +231,7 @@ cp public/index.php public/index.php.previous     # before overwriting
 
 If instead you see **"Vault temporarily unavailable"**, the app cannot reach the database or
 cannot read its configuration — that is almost always a permissions or path problem with
-`coldvault.env`, not the update. Restore `coldvault.env.backup` and check the file mode
+`coldvault.env`, not the update. Restore `~/coldvault.env.backup` and check the file mode
 (`600` on a typical shared host, `640` with a group change on a VPS where PHP runs as
 `www-data`). See [INSTALL.md](INSTALL.md).
 

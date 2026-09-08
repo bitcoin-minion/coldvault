@@ -41,7 +41,14 @@ $key = base64_encode(random_bytes(32));
 echo "\n";
 echo "  Add this line to your coldvault.env (and to nothing else):\n\n";
 echo "    APP_KEY=" . $key . "\n\n";
-echo "  Then:  chmod 600 coldvault.env\n";
+echo "  Then restrict it so only the app can read it:\n";
+echo "    chmod 600 coldvault.env                     # PHP runs as you (cPanel, local test)\n";
+echo "    sudo chown root:www-data coldvault.env \\\n";
+echo "      && sudo chmod 640 coldvault.env           # PHP runs as www-data (typical VPS)\n\n";
+// 2026-09-08 (second independent review): this used to print 600 unconditionally. On a VPS
+//   where PHP runs as www-data that makes the file unreadable to the app, which then reports
+//   "Vault temporarily unavailable" against a healthy database - a confusing failure to debug
+//   at the exact moment someone is following setup instructions for the first time.
 echo "\n";
 echo "  Back this key up off the server NOW, before creating an account.\n";
 echo "  Losing it locks every account out permanently. Changing it does the same.\n";

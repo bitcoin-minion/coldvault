@@ -22,6 +22,16 @@
 --   A full dump of this database, on its own, reveals no phrase and no keyword.
 -- ---------------------------------------------------------------------------
 
+-- 2026-09-08 (second independent review): every CREATE TABLE carries IF NOT EXISTS, because
+-- UPGRADING.md described re-applying this file as "additive" and it was not - the first existing
+-- table aborted the import with an error, part-way through, which is a poor thing to discover
+-- during an upgrade. It is now safe to re-run: missing tables are created, existing ones are left
+-- exactly as they are.
+-- ⚠️ That means re-running this file is NOT an upgrade mechanism. IF NOT EXISTS skips a table that
+--   already exists even when its columns are out of date, silently and with no error. Column and
+--   index changes for an existing install are listed explicitly in UPGRADING.md; apply those.
+-- There are no DROP statements here on purpose, so this file can never destroy data.
+
 SET NAMES utf8mb4;
 SET FOREIGN_KEY_CHECKS = 0;
 
@@ -40,7 +50,7 @@ SET FOREIGN_KEY_CHECKS = 0;
 --                   on evaluations caps the real owner too.
 --   last_step       the last TOTP step accepted, so a code cannot be replayed.
 -- ---------------------------------------------------------------------------
-CREATE TABLE `vault_users` (
+CREATE TABLE IF NOT EXISTS `vault_users` (
   `id`             int unsigned NOT NULL AUTO_INCREMENT,
   `username`       varchar(64)  NOT NULL,
   `username_lc`    varchar(64)  NOT NULL,
@@ -74,7 +84,7 @@ CREATE TABLE `vault_users` (
 --   name_enc    optional vault name, encrypted under APP_KEY. A name like
 --               "main backup" is sensitive metadata, so it is not stored in clear.
 -- ---------------------------------------------------------------------------
-CREATE TABLE `vault` (
+CREATE TABLE IF NOT EXISTS `vault` (
   `id`         int unsigned NOT NULL AUTO_INCREMENT,
   `created_at` datetime     NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `iterations` int unsigned NOT NULL,
@@ -103,7 +113,7 @@ CREATE TABLE `vault` (
 -- payload and re-wraps only the acting owner's slot — which invalidates every
 -- other slot by design.
 -- ---------------------------------------------------------------------------
-CREATE TABLE `vault_keyslot` (
+CREATE TABLE IF NOT EXISTS `vault_keyslot` (
   `id`           int unsigned NOT NULL AUTO_INCREMENT,
   `vault_id`     int unsigned NOT NULL,
   `user_id`      int unsigned NOT NULL,
@@ -131,7 +141,7 @@ CREATE TABLE `vault_keyslot` (
 --                the invite is redeemed.
 --   fails        wrong-code attempts; the invite burns out at INVITE_MAX_FAILS.
 -- ---------------------------------------------------------------------------
-CREATE TABLE `vault_invite` (
+CREATE TABLE IF NOT EXISTS `vault_invite` (
   `id`          int unsigned NOT NULL AUTO_INCREMENT,
   `vault_id`    int unsigned NOT NULL,
   `created_by`  int unsigned NOT NULL,
@@ -164,7 +174,7 @@ CREATE TABLE `vault_invite` (
 -- reasonable hardening if you want codes to disappear with a deleted account;
 -- the app never relies on it either way.
 -- ---------------------------------------------------------------------------
-CREATE TABLE `vault_backup_codes` (
+CREATE TABLE IF NOT EXISTS `vault_backup_codes` (
   `id`        int unsigned NOT NULL AUTO_INCREMENT,
   `code_hash` char(64)     NOT NULL,
   `used_at`   datetime     DEFAULT NULL,
@@ -182,7 +192,7 @@ CREATE TABLE `vault_backup_codes` (
 -- accepted trade for storing nothing that identifies a visitor.
 -- Rows older than an hour are purged lazily on each registration attempt.
 -- ---------------------------------------------------------------------------
-CREATE TABLE `vault_reg_throttle` (
+CREATE TABLE IF NOT EXISTS `vault_reg_throttle` (
   `ts` datetime NOT NULL,
   KEY `k_ts` (`ts`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
@@ -199,7 +209,7 @@ CREATE TABLE `vault_reg_throttle` (
 -- applied whether or not the username exists, so it reveals nothing about existence.
 -- Rows older than an hour are purged lazily on each attempt. No client IP is stored.
 -- ---------------------------------------------------------------------------
-CREATE TABLE `vault_login_throttle` (
+CREATE TABLE IF NOT EXISTS `vault_login_throttle` (
   `username_lc` varchar(64) NOT NULL,
   `ts` datetime NOT NULL,
   KEY `k_lc_ts` (`username_lc`,`ts`),

@@ -360,10 +360,25 @@ Expect `HTTP/1.1 200`. Then walk the checks:
 curl -sI https://vault.example.com/register/ | head -1
 curl -sI https://vault.example.com/help/     | head -1
 
-# The configuration file is NOT reachable over the web (expect 404 on all three)
-curl -sI https://vault.example.com/coldvault.env      | head -1
-curl -sI https://vault.example.com/../coldvault.env   | head -1
-curl -sI https://vault.example.com/env.php            | head -1
+# Nothing that holds a secret is reachable over the web.
+# 2026-09-08: expect 403 or 404 — NOT 200, and never any file content.
+# The .backup line is here because UPGRADING.md asks you to keep a copy of the configuration
+# before updating, and on a shared host a copy left in the tree used to be served on request.
+# Keep the copy outside the project (UPGRADING.md says so now); check anyway.
+curl -sI https://vault.example.com/coldvault.env         | head -1
+curl -sI https://vault.example.com/coldvault.env.backup  | head -1
+curl -sI https://vault.example.com/coldvault.env.bak     | head -1
+curl -sI https://vault.example.com/index.php.previous    | head -1
+curl -sI https://vault.example.com/env.php               | head -1
+curl -sI https://vault.example.com/config.php            | head -1
+
+# Both required extensions are loaded. The app REFUSES TO START without either, so a
+# "Vault temporarily unavailable" page with a healthy database is usually one of these.
+php -r 'foreach (["gd","mbstring"] as $e) printf("%-9s %s\n", $e, extension_loaded($e) ? "ok" : "MISSING");'
+php -r 'printf("freetype  %s\n", function_exists("imagettftext") ? "ok" : "MISSING");'
+
+# The import created all seven tables
+mysql -u coldvault -p coldvault -e "SHOW TABLES;" | tail -n +2 | wc -l    # expect 7
 
 # PHP is executing, not being served as text (expect no "<?php" in the output)
 curl -s https://vault.example.com/ | grep -c '<?php'
@@ -386,10 +401,20 @@ deliberately fetches nothing from a CDN or a font host, and the
 Content-Security-Policy (`default-src 'self'`, no external origin) enforces it — so
 adding an outside asset will fail silently in the browser until you widen the policy.
 
-`env.php` returning 404 is worth a word: it *is* inside `public/`, so it is reachable —
-but it produces no output and defines no route, so Apache serves an empty 200 or PHP exits
-silently. What matters is that `coldvault.env` itself, one directory up, is unreachable.
-The two curls above confirm it.
+`env.php` and `config.php` are worth a word, because this section used to describe them
+wrongly — it told you to expect `404` and then explained you might get an empty `200`.
+Neither is right. Both files *are* inside `public/`, so Apache can see them, but
+`public/.htaccess` denies them by name, so the correct answer is **403 Forbidden**. If you
+get `200` with any content, or a page of PHP source, then `AllowOverride All` is not in
+effect for this directory and **none** of the protections in that file are either — including
+the header block below. Fix that before going further.
+
+What matters most is that `coldvault.env` itself, one directory up from `public/`, is not
+web-reachable at all. Keep it out of the document root; that is the protection. The deny
+rules are the second line, for the case where a host forces you to put the project inside
+`public_html` — see
+[A11 in GETTING-STARTED.md](GETTING-STARTED.md#a11-if-your-host-will-not-allow-a-docroot-outside-public_html),
+which describes that layout and what to test.
 
 ---
 
