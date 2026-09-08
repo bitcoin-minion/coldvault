@@ -71,8 +71,14 @@ if (!$vault_https && !LOCAL_MODE) {
 // 2026-09-07 (security review): APP_BASE is echoed into many href/src attributes. It derives from
 // SCRIPT_NAME, which is server-set under stock mod_php, but some CGI/FastCGI setups let request
 // path segments leak into it. Restrict it to a safe path charset so it can never carry markup.
+// 2026-09-08 (second independent review, LOW): the charset guard alone was not enough. "//evil.com"
+//   passes it - it starts with "/" and every remaining character is in the allowed set - and
+//   "//evil.com/" is a PROTOCOL-RELATIVE URL, so every href/src attribute on the page would have
+//   pointed at an attacker's host, including the stylesheet, qrcode.js and the CAPTCHA image. Any
+//   repeated slash is now rejected, which also covers "/a//b". Belt and braces with the charset
+//   rule: the charset stops markup, this stops host substitution.
 $cv_base = rtrim(str_replace('\\', '/', dirname($_SERVER['SCRIPT_NAME'] ?? '/')), '/') . '/';
-if (!preg_match('#^/[A-Za-z0-9_./\-]*$#', $cv_base)) $cv_base = '/';
+if (!preg_match('#^/[A-Za-z0-9_./\-]*$#', $cv_base) || strpos($cv_base, '//') !== false) $cv_base = '/';
 define('APP_BASE', $cv_base);
 unset($cv_base);
 
@@ -119,8 +125,21 @@ define('MIN_KEYSLOT_BITS', 65);
 //                           another vault" check (which derives once per existing vault).
 // Unlock additionally refuses to fan out across every vault when no specific vault was chosen
 // (see the unlock handler) - it derives exactly once against the chosen vault.
+// 2026-09-08 (second independent review, HIGH): COLLISION_CHECK_MAX cut from 25 to 4. At 25 it was
+//   BOTH the CPU-amplification lever this block was written to close and a live correctness bug.
+//   An `update` that sets a new keyword costs one derivation per vault in the collision loop + 1
+//   to open + 2 to wrap and self-check, so at 25 vaults that is 27 derivations. At roughly a
+//   second each on a modest server that exceeds PHP's default max_execution_time of 30, and the
+//   loop runs AFTER vault_save() has already committed - so the request is killed, the owner's
+//   change IS saved, and they get a dead page with no way to tell. `create` at the same vault
+//   count has the same shape. At 4 the loop costs at most 3 derivations and the worst request is
+//   6, comfortably inside the limit even on slow hardware.
+//   The cost of the cut: accounts with 5+ openable vaults no longer get the advisory "that keyword
+//   also opens another of your vaults" note. It is ADVISORY only - the vault chooser made a shared
+//   keyword non-destructive - so nothing breaks without it. Fixing it properly means storing a
+//   keyword fingerprint, which is a schema change and is not done.
 define('MAX_VAULTS_PER_ACCOUNT', 50);
-define('COLLISION_CHECK_MAX', 25);
+define('COLLISION_CHECK_MAX', 4);
 
 // ============================================================================
 // How many words a recovery phrase may have.

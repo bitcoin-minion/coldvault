@@ -146,6 +146,16 @@ function cv_leet($s) {
     ]);
 }
 
+/** 2026-09-08 (second independent review): one repeated character, or a straight alphabet run.
+ *  Must stay identical to the app's cv_is_repeat_or_run() and its JS twin. */
+function cv_is_repeat_or_run($tok) {
+    $n = strlen($tok);
+    if ($n < 3) return false;
+    if (count(array_unique(str_split($tok))) === 1) return true;          // aaa, zzz
+    $az = 'abcdefghijklmnopqrstuvwxyz';
+    return strpos($az, $tok) !== false || strpos(strrev($az), $tok) !== false;   // bcd, fed
+}
+
 function cv_is_word_shaped($run) {
     $n = strlen($run);
     if ($n < 3) return false;
@@ -204,18 +214,38 @@ function cv_kw_cap($v) {
     $letters  = preg_replace('/[^a-z]/', '', $leet);
 
     $cap = 0;
-    preg_match_all('/[a-z]+|[0-9]+|\s+|[^a-z0-9\s]/u', $leet, $m);
+    // 2026-09-08 (second independent review): \x{FEFF} is grouped WITH whitespace, and the
+    //   separator test carries /u. Both were divergences from the browser twin, and both in the
+    //   dangerous direction - the server scored HIGHER than the meter, so it accepted keywords the
+    //   meter had rejected. The tokeniser's \s+ (with /u) already grouped U+00A0 and U+3000, but
+    //   the separator test below had NO /u, so those tokens fell through to the symbol branch and
+    //   earned ~6 bits each. U+FEFF was a second, separate case - JavaScript's \s matches it and
+    //   PCRE's does not. ⚠️ Keep this class identical to the app's PHP and its JS twin.
+    preg_match_all('/[a-z]+|[0-9]+|[\s\x{FEFF}]+|[^a-z0-9\s\x{FEFF}]/u', $leet, $m);
+    $symSeen = [];
     foreach ($m[0] as $tok) {
-        if (preg_match('/^\s+$/', $tok))    continue;                     // separators are free
+        if (preg_match('/^[\s\x{FEFF}]+$/u', $tok)) continue;             // separators are free
         if (preg_match('/^[a-z]+$/', $tok)) {
-            if (cv_is_word_shaped($tok))
+            // 2026-09-08 (second independent review): a letter run that is ONE character repeated
+            //   ("aaa", "zzz") or a straight alphabet run ("bcd") is not a word, whatever its vowel
+            //   ratio - it costs an attacker ~5 bits, not the ~13 a word costs. Without this the
+            //   cap sat ABOVE the base estimate and never bound, so "aaa-bbb-ccc-ddd-eee-fff" and
+            //   "bcd-cde-def-efg-fgh-ghi" both measured 66 and CLEARED the 65-bit floor while
+            //   "correct horse battery staple" was correctly refused at 44.
+            // ⚠️ Deliberately narrow: a token with 2+ distinct, non-consecutive letters ("ebb")
+            //   still earns full word credit, because the app's own 7-word generator emits exactly
+            //   that shape and a broader rule would push generated keywords under their own floor.
+            if (cv_is_repeat_or_run($tok))                  $cap += CV_CB_SEQ;
+            elseif (cv_is_word_shaped($tok))
                 $cap += in_array($tok, CV_KW_BLOCK, true) ? CV_CB_KNOWN : CV_CB_WORD;
-            else
-                $cap += strlen($tok) * $per;
+            else                                            $cap += strlen($tok) * $per;
         } elseif (preg_match('/^[0-9]+$/', $tok)) {
             $cap += cv_digits_cheap($tok) ? CV_CB_SEQ : strlen($tok) * $per;
         } else {
-            $cap += $per;
+            // 2026-09-08: charge each DISTINCT symbol once. Picking "-" as a separator is one
+            //   decision, not one per occurrence; charging it five times gave a patterned keyword
+            //   ~29 bits of headroom purely from its delimiters.
+            if (!isset($symSeen[$tok])) { $symSeen[$tok] = 1; $cap += $per; }
         }
     }
 
@@ -577,8 +607,17 @@ function selftest() {
         ['Fluffy2019',                         37, false ],   // one word + a year
         ['xK7$mQ9!zR2#pL4',                    92, true  ],   // random string - must NOT be discounted
         ['aaa-aaa-aaa-aaa-aaa-aaa',            11, false ],   // repetition buys nothing
-        ['aaaaaaaaaaaaaaaaaaaaaaaa',            9, false ],   //   "
+        ['aaaaaaaaaaaaaaaaaaaaaaaa',            7, false ],   //   " (2026-09-08: 9 -> 7, now charged as a run)
         ['ab-ab-ab-ab-ab-ab-ab-ab-ab-ab',      12, false ],   //   "
+        // 2026-09-08 (second independent review): the repeat/run rule. Both of these measured 66
+        //   and CLEARED the floor before it, because the structural cap sat above the base estimate
+        //   and never bound. Pinned here so that can never silently come back.
+        ['aaa-bbb-ccc-ddd-eee-fff',            48, false ],
+        ['bcd-cde-def-efg-fgh-ghi',            48, false ],
+        // ...and the two shapes that still get through, pinned so the gap is documented rather than
+        //   forgotten. Closing these needs dictionary/pattern analysis, not a ceiling.
+        ['aab-aac-aad-aae-aaf-aag',            66, true  ],   // shared prefix
+        ['zzz zzz1 zzz2 zzz3 zzz4 zzz5',       84, true  ],   // stem plus counter
         ['MyPassword2026',                     37, false ],   // 2026-09-08: word + year, was 83
         ['Summer2026!Winter',                  47, false ],   // 2026-09-08: two words + year, was 112
         ['seedphrasebackup',                   13, false ],   // 2026-09-08: run-together words, was 75

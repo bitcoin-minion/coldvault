@@ -6,6 +6,115 @@ There are no release tags yet, so each entry describes the state of `main` on th
 
 ---
 
+## 2026-09-08 — second independent security review
+
+A second review, run against the previous day's commit by reviewers with no knowledge of the first
+review's findings or conclusions. It confirmed several known-open items and found five new ones at
+high severity or above. **No schema change.** One migration step is required if this instance ever
+ran a build from before 2026-09-07 — see [UPGRADING.md](UPGRADING.md).
+
+Three of the findings below came from reviewers deliberately trying to *falsify* claims written in
+the code comments and in `SECURITY.md`. Every one of those claims was wrong. They are quoted where
+they were wrong, rather than quietly deleted, because the reasoning error is the useful part.
+
+### Fixed (high severity)
+
+- **A rate-limit key namespace could be spent by anyone.** `vault_login_throttle` carried both the
+  sign-in budget and the keyword-failure budget, the latter under the key `kw:<user id>`. A comment
+  argued this could never collide with a real account because usernames may not contain a colon —
+  but that rule was only ever enforced on the *registration* path, while the sign-in path wrote the
+  raw submitted username into the same column. So an anonymous request with `username=kw:<id>`
+  spent that account's keyword budget, locking the owner out of their own vault with no
+  self-service remedy. Every key is now explicitly namespaced, and the sign-in path validates the
+  username format before recording anything. Found independently by two reviewers.
+- **A username-keyed rate limit is a denial of service.** Once the hourly sign-in budget was spent,
+  each further attempt required an interval to have elapsed since the newest attempt — a clock
+  *shared* by everyone submitting that username. Anyone who knew a username could poll once a
+  minute and win every race against a human filling in a form, holding the account shut
+  indefinitely. Attempts now fall through to a small per-client reserve that an attacker cannot
+  spend, so a correct code is always evaluated. This closes the denial of service; it does not
+  tighten the guessing bound.
+- **A correct keyword was an unmetered CPU amplifier.** The keyword-failure budget counts only
+  *wrong* keywords, by design, which left successful operations entirely unmetered. An update that
+  set a new keyword performed up to 27 key derivations — enough to exceed PHP's default
+  `max_execution_time`, and enough for one registered account to saturate every PHP worker on the
+  host. A per-account *work* budget is now charged for every keyword-bearing request whatever its
+  outcome, and the advisory keyword-collision check (which derived once per vault) is capped much
+  lower.
+- **A keyword-collision check could kill its own request after committing.** The same 27
+  derivations ran *after* the vault write had been committed, so an owner with many vaults had the
+  request killed mid-loop: the change was saved but the page died with no way to tell.
+
+### Fixed (medium severity)
+
+- **The legacy AAD fallback allowed a cross-column transplant.** Blobs written before context
+  binding carry a *constant* AAD, so they decrypt in any context. The previous note here argued the
+  fallback was safe "because forging requires `APP_KEY` and freshly written blobs are always
+  bound" — which reasoned about forging and missed *moving*. A vault name is a blob whose plaintext
+  the attacker chooses, so a name could be copied onto a stored authenticator secret, making that
+  name the victim's TOTP secret. The fallback is removed; run `tools/migrate-aad.php` once when
+  upgrading. `ak_decrypt_bound()`, `user_secret_is_legacy()` and `user_migrate_secret()` are gone
+  with it — removing the fallback made all three permanently inert rather than merely unused.
+- **CAPTCHA state enumerated accounts.** The two sign-in messages were made identical in the first
+  review, but the *state* deciding whether to demand a CAPTCHA was `vault_users.fail_count`, which
+  only exists for accounts that exist. Three wrong codes, then one attempt from a fresh session,
+  distinguished a real username from an unused one. The trigger now counts failures in a namespace
+  recorded whether or not the account exists.
+- **An over-long payload could be silently truncated.** The update path had no length caps (only
+  the create path did), so a long passphrase produced a payload larger than the ciphertext column.
+  On a server without strict SQL mode that is truncated, and since the authentication tag covers
+  the whole plaintext the vault then never opens again — indistinguishable from a forgotten
+  keyword. Both encryption entry points now bound the plaintext, and the writes check that a row
+  was actually affected.
+- **Three ciphertext writes had no scope clause or result check.** Concurrent requests from the
+  owner's own two sessions could write a keyword-encrypted payload onto a row another request had
+  just upgraded to the envelope format, leaving the vault permanently unopenable. Each write now
+  carries its owner and format predicate and verifies one row changed.
+
+### Fixed (low severity)
+
+- **`APP_BASE` accepted a protocol-relative URL.** The path charset guard admitted `//host`, which
+  as a URL points at another origin — so every stylesheet, script and image link on the page could
+  be redirected. Repeated slashes are now rejected.
+- **The key-derivation iteration count had no upper bound.** It is read from the row, which is what
+  a database-write attacker controls, so one edit could make every unlock run for hours.
+- **Invite creation had no engine-level authorization.** The handler checked ownership, a step-up
+  code and the keyword, so it was not exploitable — but it was the only damaging write not
+  re-proving ownership *inside* the function that writes, which is the pattern that keeps a
+  refactor from silently dropping a check.
+- **A failed registration burned a site-wide sign-up slot** for an hour, because the slot is
+  reserved before the account is created.
+- **The rate limiters failed open.** A missing throttle table made every budget silently vanish;
+  they now fail closed.
+- **Sign-in no longer feeds the account-security lockout counter.** The default already stopped it
+  *arming* the lock, but not *feeding* it, so an outsider could pre-load the counter and the
+  owner's next step-up slip would lock their own recovery controls.
+
+### Changed
+
+- The two hand-copied rate-limit implementations were replaced by one primitive. The fail-closed
+  fix above had already had to be applied twice; a third copy was about to be added.
+- `tools/kwcheck.php` tracks the estimator changes below, and its pinned self-test vectors were
+  regenerated. Two patterned shapes that still clear the floor are now pinned explicitly, so the
+  gap is recorded rather than forgotten.
+
+### Known limitations, stated deliberately
+
+- The keyword entropy estimator charges a repeated or sequential letter run as a run rather than a
+  word, which closes `aaa-bbb-ccc-…` shapes. **Shared-prefix (`aab-aac-aad-…`) and
+  stem-plus-counter (`zzz zzz1 zzz2 …`) shapes still clear the 65-bit floor.** Closing those needs
+  dictionary and pattern analysis rather than a structural ceiling.
+- **The estimator's PHP and JavaScript halves disagree on non-ASCII case folding.** PHP's
+  `strtolower()` is byte-based and does not fold `Ä`, `Α` or `А`; JavaScript's `toLowerCase()`
+  does. A keyword of mixed-case non-ASCII letters therefore scores higher on the server than in the
+  browser meter — the server-permissive direction — and can cross the floor while the meter refuses
+  it. Not yet fixed: every available fix is a trade (a new `mbstring` dependency, an incomplete
+  fold table, or restricting which characters a keyword may contain).
+- A per-account rate limit still cannot bound a large botnet, and no limit keyed on a username can
+  be both denial-of-service-proof and guess-bounding without identifying the client.
+
+---
+
 ## 2026-09-08 — security review
 
 A pass of hardening changes from an independent review. **Requires one new database table**

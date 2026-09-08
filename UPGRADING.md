@@ -20,6 +20,65 @@ followed by a date, for example `2026-09-08`. Compare that with the newest entry
 
 ---
 
+## The second-review release (2026-09-08, later than the one below)
+
+A second independent security review. It replaces `public/index.php`, `public/auth.php`,
+`public/config.php` and `public/crypto.php`, updates `tools/kwcheck.php`, and adds
+`tools/migrate-aad.php`.
+
+| | |
+|---|---|
+| Database change needed? | **No new tables or indexes.** |
+| New setting in `coldvault.env`? | **No.** |
+| Do I have to re-enter my `APP_KEY`? | **No.** Never re-generate it. |
+| One-off command to run? | **Yes, if this instance ever ran a build from before 2026-09-07.** See below. |
+
+### Run the AAD migration once
+
+Blobs written before 2026-09-07 carry a *constant* authentication context, which means such a blob
+decrypts correctly in any column — so anyone able to *write* to the database could move one blob
+into a different column and have it accepted. That fallback is now removed, which closes the hole
+and also means any blob still written the old way **stops opening**. This moves them across:
+
+```bash
+php tools/migrate-aad.php
+```
+
+That is a **dry run**: it reports what it would change and writes nothing. Read the output, then:
+
+```bash
+php tools/migrate-aad.php --commit
+```
+
+It re-encrypts in one transaction, verifies every row opens under its new context *before*
+committing, and rolls the whole thing back on any failure. Rows already migrated are skipped, so
+running it twice is harmless. It prints no plaintext — only lengths.
+
+- **If the dry run says "Nothing to do"**, this instance has no old blobs and you are finished.
+- **If it reports `UNDECRYPTABLE` for any row, stop.** That means the `APP_KEY` in `coldvault.env`
+  is not the key those blobs were written with. Nothing is written when any row fails. Restore the
+  correct key first.
+
+> ⚠️ Earlier guidance said stored secrets were "re-encrypted in a stronger form automatically on
+> each account's next sign-in". That automatic path **no longer exists** — it only ever covered the
+> authenticator secret, never the vault names or labels, and it depended on the fallback that has
+> now been removed. The command above is the supported route, and it covers all four columns.
+
+### What changed that you may notice
+
+- The advisory note *"that keyword also opens another of your vaults"* now only appears on accounts
+  with a small number of vaults. It was costing one key derivation per vault, which on a busy
+  account was enough to exceed PHP's `max_execution_time` **after** the save had already been
+  committed — so the change was saved but the page died. The note is advisory only.
+- Sign-in may ask for the human check slightly sooner or later than before: the counter behind it
+  moved off a per-account column onto a rolling one-hour window, so that it behaves identically for
+  usernames that do not exist. It also means an outsider can no longer leave a permanent human
+  check on someone else's sign-in form.
+- Vault operations are now rate-limited by *work* as well as by failures. The limit is far above
+  normal use (60 keyword operations an hour) and never fully locks.
+
+---
+
 ## The security-review release (2026-09-08)
 
 This release hardens authentication, transport, and denial-of-service handling. It replaces
@@ -30,7 +89,7 @@ This release hardens authentication, transport, and denial-of-service handling. 
 |---|---|
 | Database change needed? | **Yes — one new table and one new index.** Run the statements below (or re-apply `schema/coldvault.sql`, which is additive for the table; the index must be added by hand on an existing install). |
 | New setting in `coldvault.env`? | **Optional, two.** `TRUST_FORWARDED_PROTO=1` only if TLS is terminated by a proxy in front of this app. `CANONICAL_HOST` only if you want the app itself to redirect plain HTTP to HTTPS (see below). Leave both unset for a direct-to-Apache/cPanel install. |
-| Do I have to re-enter my `APP_KEY`? | **No.** Never re-generate it. Existing authenticator secrets, labels and backup codes keep working; secrets are re-encrypted in a stronger form automatically on each account's next sign-in. |
+| Do I have to re-enter my `APP_KEY`? | **No.** Never re-generate it. Existing authenticator secrets, labels and backup codes keep working. (This entry used to say secrets were re-encrypted "automatically on each account's next sign-in". That path was removed on 2026-09-08 — see the second-review release above, which replaces it with `tools/migrate-aad.php`.) |
 
 Apply the new table and the new index (safe to run once; the table stores no client IP):
 

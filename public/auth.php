@@ -24,8 +24,14 @@ define('AUTH_LOCK_SECS',   300);   // lockout duration (step-up path only - see 
 // 2026-09-03: wrong logins before the sign-in form demands the human check. This is what
 //   rate-limits code guessing now that a lockout no longer refuses a login - the lockout
 //   was a denial of service, because anyone who knew a username could hold that account
-//   shut indefinitely. It counts fail_count, which is server-side state a client cannot
-//   clear by dropping its cookie.
+//   shut indefinitely.
+// 2026-09-08 (second independent review, MEDIUM): this used to count vault_users.fail_count. It
+//   now counts the "f:" namespace in vault_login_throttle instead - still server-side state a
+//   client cannot clear by dropping its cookie, but recorded for names that do NOT exist too,
+//   because counting existence-only state enumerated accounts. See login_fail_count(). The one
+//   trade-off of the move: "f:" rows expire after an hour, where fail_count persisted until a
+//   success. Judged worth it - an hour of memory is enough to price code guessing, and it also
+//   means an outsider can no longer leave a permanent CAPTCHA on someone else's login form.
 define('AUTH_CAPTCHA_AFTER', 3);
 // 2026-09-07 (security review): per-account sign-in budget. A sign-in is one 6-digit code with
 //   no password, so the CAPTCHA was the ONLY limiter and ~333k guesses (a few hundred dollars of
@@ -43,6 +49,19 @@ define('LOGIN_THROTTLE_INTERVAL', 60);   // seconds between attempts once the ho
 //   interval always gets through, so this cannot be turned into a denial of service against them.
 define('KW_MAX_FAILS_PER_HOUR', 10);
 define('KW_THROTTLE_INTERVAL',  60);   // seconds between attempts once the failure budget is spent
+// 2026-09-08 (second independent review, HIGH): a per-account WORK budget. The kw: budget above
+//   counts only WRONG keywords - deliberately, so a legitimate owner never meets it - which left a
+//   CORRECT keyword as a completely unmetered CPU lever. An `update` performed up to 27 PBKDF2
+//   derivations and nothing recorded it, so any account that could register was able to hold every
+//   PHP worker busy indefinitely and take down every other site sharing the same hosting account,
+//   not just this one. This budget is charged for EVERY keyword-bearing POST whatever the outcome,
+//   because it bounds COST, not guessing. Set well above any real session (60 vault operations in
+//   an hour), and like the other two it throttles rather than locks.
+define('KW_WORK_MAX_PER_HOUR', 60);
+define('KW_WORK_INTERVAL',     60);   // seconds between operations once the work budget is spent
+// 2026-09-08 (second independent review, HIGH): per-client reserve on the sign-in budget. See
+//   login_throttle_wait() for why a budget keyed on the username alone is a denial of service.
+define('LOGIN_BUCKET_RESERVE', 5);    // attempts per hour a single client keeps when the global budget is spent
 // Registrations allowed per hour SITE-WIDE. There is no per-address counter
 // because no client IP is ever recorded (see the privacy notes in README).
 // Accepted trade-off: a sign-up flood can block new registrations for an hour.
@@ -55,17 +74,27 @@ define('REG_MAX_PER_HOUR', 5);
 //   one account/column cannot be transplanted onto another and still decrypt. Forging any blob
 //   needs APP_KEY (to make the GCM tag), and every new blob is context-bound, so a database-write
 //   attacker can no longer copy their own authenticator secret or backup-code rows onto a victim.
-//   ak_decrypt falls back to the pre-review constant AAD so blobs written by older code still open;
-//   because forging requires APP_KEY and freshly written blobs are always bound, that fallback
-//   cannot be abused to re-enable the transplant. New writes should always pass $ctx.
+// 2026-09-08 (second independent review, MEDIUM): the LEGACY FALLBACK IS GONE, and the note that
+//   used to sit here - "because forging requires APP_KEY and freshly written blobs are always
+//   bound, that fallback cannot be abused to re-enable the transplant" - was wrong. It reasoned
+//   about FORGING and missed MOVING. A legacy blob carries the constant AAD, which belongs to no
+//   column and no row, so any legacy blob decrypted in ANY context. That made this concrete:
+//   vault names are blobs whose plaintext an attacker can CHOOSE (they name the vault), so a
+//   database-write attacker could copy a name_enc onto a legacy secret_blob and that vault name
+//   became the victim's TOTP secret - a secret the attacker picked. Account takeover, with nothing
+//   forged. Every ak_encrypt call site passes $ctx, so nothing written by this version relies on
+//   the fallback.
+// ⚠️ UPGRADING: a deployment that ran a build from before 2026-09-07 may still hold blobs under
+//   the old constant AAD, and those will stop opening. Run `php tools/migrate-aad.php --commit`
+//   ONCE after deploying this version; see UPGRADING.md. Do NOT re-add a fallback - if a blob ever
+//   fails to decrypt, the answer is that migration, not a decrypt that accepts a blob from
+//   somewhere else.
 function ak_aad($ctx){ return ($ctx === '') ? 'coldvault-auth' : 'coldvault-auth:'.$ctx; }
 function ak_encrypt($p,$ctx=''){ $n=random_bytes(12);$t='';$c=openssl_encrypt($p,'aes-256-gcm',APP_KEY,OPENSSL_RAW_DATA,$n,$t,ak_aad($ctx),16);return $c===false?false:$n.$t.$c; }
 function ak_decrypt($b,$ctx=''){
     if(strlen($b)<=28)return false;                                  // 28 = nonce(12)+tag(16); reject empty ciphertext
     $n=substr($b,0,12);$t=substr($b,12,16);$c=substr($b,28);
-    $p=openssl_decrypt($c,'aes-256-gcm',APP_KEY,OPENSSL_RAW_DATA,$n,$t,ak_aad($ctx));
-    if($p===false && $ctx!=='') $p=openssl_decrypt($c,'aes-256-gcm',APP_KEY,OPENSSL_RAW_DATA,$n,$t,ak_aad(''));  // legacy row written before context binding
-    return $p;
+    return openssl_decrypt($c,'aes-256-gcm',APP_KEY,OPENSSL_RAW_DATA,$n,$t,ak_aad($ctx));   // bound context ONLY - see above
 }
 // Context strings for each APP_KEY-protected column. Kept short and stable.
 function ak_ctx_secret($lc){ return 's:u:'.strtolower(trim($lc)); }     // TOTP secret_blob, bound to username_lc
@@ -156,24 +185,15 @@ function user_exists($con,$username){ return user_find($con,$username)!==null; }
 function user_secret($row){ return ($row&&!empty($row['secret_blob']))?ak_decrypt($row['secret_blob'],ak_ctx_secret($row['username_lc']??'')):false; }
 // Decrypt a blob under the BOUND context only (no legacy fallback). Used to detect a legacy
 // row so it can be re-encrypted context-bound on next use.
-function ak_decrypt_bound($b,$ctx){
-    if(strlen($b)<=28)return false;
-    return openssl_decrypt(substr($b,28),'aes-256-gcm',APP_KEY,OPENSSL_RAW_DATA,substr($b,0,12),substr($b,12,16),ak_aad($ctx));
-}
-// True if this account's secret_blob is still under the legacy (unbound) AAD.
-function user_secret_is_legacy($row){
-    if(!$row||empty($row['secret_blob']))return false;
-    return ak_decrypt_bound($row['secret_blob'],ak_ctx_secret($row['username_lc']??''))===false
-        && user_secret($row)!==false;
-}
-// Re-encrypt a legacy secret_blob under the bound context (idempotent; skips already-bound rows).
-function user_migrate_secret($con,$row){
-    if(!user_secret_is_legacy($row))return;
-    $sec=user_secret($row); if($sec===false)return;
-    $blob=ak_encrypt($sec,ak_ctx_secret($row['username_lc']??'')); if($blob===false)return;
-    $s=mysqli_prepare($con,"UPDATE vault_users SET secret_blob=? WHERE id=?");
-    if($s){mysqli_stmt_bind_param($s,'si',$blob,$row['id']);mysqli_stmt_execute($s);}
-}
+// 2026-09-08 (second independent review): ak_decrypt_bound(), user_secret_is_legacy() and
+//   user_migrate_secret() were DELETED here, because removing the legacy fallback in ak_decrypt()
+//   made all three permanently inert - not merely unused. They detected a legacy row by asking
+//   "does it fail bound but succeed unbound?", and with ak_decrypt() now bound-only both halves of
+//   that test move together, so user_secret_is_legacy() could never again return true. Leaving a
+//   no-op migration in place that reads as if it still migrates is worse than not having one.
+//   They also only ever covered secret_blob; vault names and keyslot labels had no migration path
+//   at all, which is half of why the transplant stayed live. tools/migrate-aad.php covers all four
+//   columns, verifies every row before committing, and is the supported upgrade route.
 function user_locked($row){ if($row&&!empty($row['lock_until'])&&strtotime($row['lock_until'])>time())return strtotime($row['lock_until'])-time();return 0; }
 function user_register($con,$username,$secretRaw,$codes){
     $lc=strtolower(trim($username));
@@ -198,6 +218,10 @@ function user_register($con,$username,$secretRaw,$codes){
 //   path passes true. Previously a wrong sign-in armed lock_until too, letting an outsider who
 //   knew a username keep the owner's account-security controls (sign-out-others, re-pair, revoke)
 //   permanently "Too many attempts" - a denial of exactly the incident-response tools.
+// 2026-09-08 (second independent review): $armLock=false now has NO caller - the sign-in path no
+//   longer bumps fail_count at all (see index.php). The parameter is kept anyway, because the
+//   non-arming default is the SAFE one: a future caller that forgets it gets a counter bump and
+//   not a lockout, which is the failure direction we want. Do not "simplify" it to always arm.
 function user_fail($con,$uid,$armLock=false){
     mysqli_query($con,"UPDATE vault_users SET fail_count=fail_count+1 WHERE id=".(int)$uid);
     if(!$armLock)return;
@@ -342,48 +366,167 @@ function reg_reserve($con){
     if($ok) mysqli_commit($con); else mysqli_rollback($con);
     return $ok;
 }
+// 2026-09-08 (second independent review, LOW): hand the slot BACK when the registration it was
+//   reserved for fails. reg_reserve() commits its row before user_register() runs, so a failed
+//   create - the UNIQUE-username race, or a backup-code insert failing - consumed one of only
+//   REG_MAX_PER_HOUR site-wide slots for a full hour with no account to show for it. A handful of
+//   those closed sign-ups for everybody, which is the same site-wide denial of service the
+//   no-client-IP design already accepts, except triggered by accident rather than by a flood.
+//   vault_reg_throttle has no id column, so this deletes the NEWEST row rather than "ours". Two
+//   concurrent releases then each delete one row, which is still correct: each inserted one.
+function reg_release($con){ mysqli_query($con,"DELETE FROM vault_reg_throttle ORDER BY ts DESC LIMIT 1"); }
+
+// ---- the shared throttle table: FIVE DISJOINT KEY NAMESPACES ----
+// 2026-09-08 (second independent review, HIGH): vault_login_throttle carries several budgets. The
+//   keyword budget used the key "kw:<uid>", and the comment here used to argue that could never
+//   collide with a real account because username_valid() forbids a colon. That was FALSE as a
+//   security property: username_valid() was only ever called on the REGISTRATION path, while
+//   login_throttle_record() wrote the raw $_POST['username'] into the same column. So an anonymous
+//   client could POST username=kw:<uid> and spend any account's keyword budget, locking that owner
+//   out of their own vault - with no remedy, since the key is their uid and never changes. Two
+//   reviewers found it independently.
+// The fix does not rely on a rule enforced somewhere else. Every key is now explicitly namespaced,
+//   so nothing a client can type can land in another namespace even if a future change drops the
+//   format check again. The login path validates the format as well (index.php).
+// ⚠️ Five namespaces share this table: "u:" sign-in budget, "b:" per-client sign-in reserve,
+//   "f:" sign-in failures (drives the CAPTCHA), "kw:" wrong keywords, "w:" keyword work. Keep the
+//   prefixes disjoint, and never key a new budget in this table without one. Only "u:", "b:" and
+//   "f:" embed client-supplied text, and all three are prefixed before it, so nothing typed can
+//   reach another namespace.
+function login_throttle_key($username){ return 'u:'.strtolower(trim($username)); }
+function kw_throttle_key($uid){ return 'kw:'.(int)$uid; }
+function kw_work_key($uid){ return 'w:'.(int)$uid; }
+function login_bucket_key($username){ return 'b:'.cv_client_bucket().':'.strtolower(trim($username)); }
+
+// ---- the one budget primitive (2026-09-08, second independent review) ----
+// There were two hand-copied versions of this and a third was about to be added. The fail-closed
+// fix below had already had to be applied twice; a third copy meant the next fix to it would have
+// to land in three places, and the one that got missed would be the one that mattered. Under $max
+// rows in the trailing hour, free; at or over it, one attempt per $interval measured from the
+// newest row.
+// ⚠️ A failed prepare FAILS CLOSED (returns $interval, not 0). It used to `return 0`, so if this
+//   table were ever missing every budget vanished silently and sign-in became an unlimited 6-digit
+//   oracle. A static statement cannot fail transiently; it means the schema is wrong, and refusing
+//   is the only safe reading of that.
+function cv_budget_wait($con,$key,$max,$interval){
+    mysqli_query($con,"DELETE FROM vault_login_throttle WHERE ts < (NOW() - INTERVAL 1 HOUR)");
+    $s=mysqli_prepare($con,"SELECT COUNT(*) c, TIMESTAMPDIFF(SECOND, MAX(ts), NOW()) since FROM vault_login_throttle WHERE username_lc=? AND ts > (NOW() - INTERVAL 1 HOUR)");
+    if(!$s)return $interval;
+    mysqli_stmt_bind_param($s,'s',$key);mysqli_stmt_execute($s);$r=mysqli_stmt_get_result($s);$row=$r?mysqli_fetch_assoc($r):null;
+    if(!$row||(int)$row['c']<$max)return 0;
+    $since=($row['since']===null)?$interval:(int)$row['since'];
+    return ($since>=$interval)?0:($interval-$since);
+}
+function cv_budget_record($con,$key){
+    $s=mysqli_prepare($con,"INSERT INTO vault_login_throttle (username_lc,ts) VALUES (?,NOW())");
+    if($s){mysqli_stmt_bind_param($s,'s',$key);mysqli_stmt_execute($s);}
+}
+// How many rows this key has in the trailing hour. Used where a COUNT is wanted rather than a
+// wait, and fails CLOSED at the top of its range for the same reason as cv_budget_wait().
+function cv_budget_count($con,$key){
+    $s=mysqli_prepare($con,"SELECT COUNT(*) c FROM vault_login_throttle WHERE username_lc=? AND ts > (NOW() - INTERVAL 1 HOUR)");
+    if(!$s)return PHP_INT_MAX;
+    mysqli_stmt_bind_param($s,'s',$key);mysqli_stmt_execute($s);$r=mysqli_stmt_get_result($s);$row=$r?mysqli_fetch_assoc($r):null;
+    return $row?(int)$row['c']:PHP_INT_MAX;
+}
+
+// ---- coarse client bucket, for denial-of-service isolation ONLY (2026-09-08) ----
+// ⚠️ PRIVACY - read this before touching it. This is NOT an IP record. No address is stored,
+//   logged, or compared anywhere: it is run through HMAC-SHA256 under a key derived from APP_KEY
+//   (which lives OUTSIDE the database) that ROTATES EVERY HOUR, then truncated to 16 bits. About
+//   65,000 IPv4 addresses share each of the 65,536 buckets, so even someone holding both the
+//   database and APP_KEY learns only "one of ~65,000 addresses", and the hourly key means two
+//   hours' buckets cannot be correlated. The rows carrying it self-purge after an hour like every
+//   other row in this table. Keep all three properties - key rotation, truncation, and purging -
+//   if this is ever changed; each one is doing work.
+// REMOTE_ADDR only. Never X-Forwarded-For: the client controls it and could mint a fresh bucket
+//   per request, which is the same reason TRUST_FORWARDED_PROTO defaults to false.
+// APP_KEY is checked because captcha.php loads auth.php WITHOUT config.php, so the constant is
+//   genuinely absent on that path. Degrading to one shared bucket is exactly the old behaviour.
+function cv_client_bucket(){
+    $ip=(string)($_SERVER['REMOTE_ADDR']??'');
+    if($ip===''||!defined('APP_KEY'))return '0000';
+    $k=hash_hmac('sha256','cv-login-bucket|'.floor(time()/3600),APP_KEY,true);
+    return substr(bin2hex(hash_hmac('sha256',$ip,$k,true)),0,4);
+}
 
 // ---- per-account sign-in throttle (2026-09-07 security review) ----
 // Returns seconds the caller must wait before another code evaluation for this username, or 0.
-// Under the hourly budget it returns 0 (evaluate freely). Once the budget is spent it returns 0
-// only if LOGIN_THROTTLE_INTERVAL has elapsed since the last attempt, so the account is slowed but
-// never fully locked. Keyed on username_lc regardless of whether the account exists.
+// Keyed on the username regardless of whether the account exists, so it leaks no existence.
+// 2026-09-08 (second independent review, HIGH): a budget keyed on the USERNAME ALONE is a denial
+//   of service, and the "never fully locks" note that used to sit here was wrong about why. Once
+//   the hourly budget was spent, every attempt needed LOGIN_THROTTLE_INTERVAL to have elapsed
+//   since the newest row - a clock SHARED by everyone posting that username. An attacker polling
+//   once a minute (60 requests an hour, nothing) kept that clock permanently fresh and won every
+//   race against a human clicking a form, holding a known account shut for good. Making it a hard
+//   hourly lock is no better: the window slides, so they simply re-spend it every hour.
+//   The escape hatch therefore has to be capacity an attacker who knows the username CANNOT
+//   spend, and the only honest candidate is the client itself - hence cv_client_bucket() above,
+//   whose privacy properties are spelled out there. When the global budget is spent we fall
+//   through to this client's own reserve, on its own clock. An attacker in a different bucket
+//   cannot touch it, so a correct code always gets evaluated.
+// Known limits, deliberately accepted: a large botnet gets LOGIN_BUCKET_RESERVE extra attempts
+//   per bucket it occupies, and with enough buckets could blanket the space and deny service
+//   again - but that is thousands of times the effort, and the CAPTCHA (which every attempt needs
+//   once the failure count passes AUTH_CAPTCHA_AFTER) is priced per attempt on top. The sustained
+//   rate for a single-source attacker is unchanged at one per interval; this fix closes the denial
+//   of service, it does not tighten the guessing bound.
 function login_throttle_wait($con,$username){
-    $lc=strtolower(trim($username)); if($lc==='')return 0;
-    mysqli_query($con,"DELETE FROM vault_login_throttle WHERE ts < (NOW() - INTERVAL 1 HOUR)");
-    $s=mysqli_prepare($con,"SELECT COUNT(*) c, TIMESTAMPDIFF(SECOND, MAX(ts), NOW()) since FROM vault_login_throttle WHERE username_lc=? AND ts > (NOW() - INTERVAL 1 HOUR)");
-    if(!$s)return 0;
-    mysqli_stmt_bind_param($s,'s',$lc);mysqli_stmt_execute($s);$r=mysqli_stmt_get_result($s);$row=$r?mysqli_fetch_assoc($r):null;
-    if(!$row||(int)$row['c']<LOGIN_MAX_PER_HOUR)return 0;
-    $since=($row['since']===null)?LOGIN_THROTTLE_INTERVAL:(int)$row['since'];
-    return ($since>=LOGIN_THROTTLE_INTERVAL)?0:(LOGIN_THROTTLE_INTERVAL-$since);
+    $lc=login_throttle_key($username); if($lc==='u:')return 0;
+    $w=cv_budget_wait($con,$lc,LOGIN_MAX_PER_HOUR,LOGIN_THROTTLE_INTERVAL);
+    if($w===0)return 0;
+    return cv_budget_wait($con,login_bucket_key($username),LOGIN_BUCKET_RESERVE,LOGIN_THROTTLE_INTERVAL);
 }
+// Both keys are recorded, so a client cannot spend the global budget without also spending its
+// own reserve - otherwise the reserve would simply be free attempts on top for everyone.
 function login_throttle_record($con,$username){
-    $lc=strtolower(trim($username)); if($lc==='')return;
-    $s=mysqli_prepare($con,"INSERT INTO vault_login_throttle (username_lc,ts) VALUES (?,NOW())");
-    if($s){mysqli_stmt_bind_param($s,'s',$lc);mysqli_stmt_execute($s);}
+    $lc=login_throttle_key($username); if($lc==='u:')return;
+    cv_budget_record($con,$lc);
+    cv_budget_record($con,login_bucket_key($username));
+}
+
+// ---- durable, existence-INDEPENDENT sign-in failure count (2026-09-08, 2nd review, MEDIUM) ----
+// The CAPTCHA requirement used to read vault_users.fail_count, which only exists for accounts that
+// exist - so it enumerated them. An attacker sent three wrong codes for a name (fail_count rises
+// only inside `if ($row)`), then from a FRESH session sent one more: a demand to "solve the human
+// check" meant the account was real, "Invalid username or code." meant it was not. That defeated
+// the whole point of making the two messages identical.
+// This counter is keyed on the ATTEMPTED name in its own "f:" namespace, recorded whether or not
+// the account exists, so the CAPTCHA now appears at exactly the same point either way. Like
+// fail_count it is server-side, so dropping the cookie does not clear it; unlike fail_count it
+// expires after an hour, which is the deliberate trade - see AUTH_CAPTCHA_AFTER.
+// Only FAILURES are recorded, so signing in normally never demands a CAPTCHA.
+function login_fail_key($username){ return 'f:'.strtolower(trim($username)); }
+function login_fail_count($con,$username){
+    $k=login_fail_key($username); if($k==='f:')return 0;
+    return cv_budget_count($con,$k);
+}
+function login_fail_record($con,$username){
+    $k=login_fail_key($username); if($k==='f:')return;
+    cv_budget_record($con,$k);
 }
 
 // ---- per-account keyword-failure budget (2026-09-08, internal audit L1) ----
-// Stored in vault_login_throttle under the key "kw:<uid>". That needs no schema change and cannot
-// collide with a real account: username_valid() is /^[A-Za-z0-9_.-]{3,32}$/, so a colon can never
-// appear in a username. Rows self-purge after an hour, the same as the sign-in budget.
-function kw_throttle_key($uid){ return 'kw:'.(int)$uid; }
+// Keyed "kw:<uid>" in the same table, in its own namespace (see above). Rows self-purge after an
+// hour, the same as the sign-in budget. Fails closed on a missing table, for the same reason.
 function kw_fail_wait($con,$uid){
     if((int)$uid<=0)return 0;
-    $k=kw_throttle_key($uid);
-    mysqli_query($con,"DELETE FROM vault_login_throttle WHERE ts < (NOW() - INTERVAL 1 HOUR)");
-    $s=mysqli_prepare($con,"SELECT COUNT(*) c, TIMESTAMPDIFF(SECOND, MAX(ts), NOW()) since FROM vault_login_throttle WHERE username_lc=? AND ts > (NOW() - INTERVAL 1 HOUR)");
-    if(!$s)return 0;
-    mysqli_stmt_bind_param($s,'s',$k);mysqli_stmt_execute($s);$r=mysqli_stmt_get_result($s);$row=$r?mysqli_fetch_assoc($r):null;
-    if(!$row||(int)$row['c']<KW_MAX_FAILS_PER_HOUR)return 0;
-    $since=($row['since']===null)?KW_THROTTLE_INTERVAL:(int)$row['since'];
-    return ($since>=KW_THROTTLE_INTERVAL)?0:(KW_THROTTLE_INTERVAL-$since);
+    return cv_budget_wait($con,kw_throttle_key($uid),KW_MAX_FAILS_PER_HOUR,KW_THROTTLE_INTERVAL);
 }
 // Called ONLY when a keyword failed to open something. Never on success.
 function kw_fail_record($con,$uid){
     if((int)$uid<=0)return;
-    $k=kw_throttle_key($uid);
-    $s=mysqli_prepare($con,"INSERT INTO vault_login_throttle (username_lc,ts) VALUES (?,NOW())");
-    if($s){mysqli_stmt_bind_param($s,'s',$k);mysqli_stmt_execute($s);}
+    cv_budget_record($con,kw_throttle_key($uid));
+}
+
+// ---- per-account keyword WORK budget (2026-09-08, second independent review) ----
+// Keyed "w:<uid>". Charged for every keyword-bearing POST whatever the outcome - that is the whole
+// point, and the difference from kw: above. See KW_WORK_MAX_PER_HOUR for the reasoning.
+function kw_work_wait($con,$uid){
+    if((int)$uid<=0)return 0;
+    return cv_budget_wait($con,kw_work_key($uid),KW_WORK_MAX_PER_HOUR,KW_WORK_INTERVAL);
+}
+function kw_work_record($con,$uid){
+    if((int)$uid<=0)return;
+    cv_budget_record($con,kw_work_key($uid));
 }

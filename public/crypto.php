@@ -14,14 +14,37 @@ if (!defined('VAULT_AAD')) define('VAULT_AAD', 'coldvault-v1');
 // 2026-09-03: returns false on a non-positive iteration count instead of letting
 //   hash_pbkdf2() raise a fatal ValueError. A format-2 row carries iterations=0, so a
 //   mislabelled or corrupt row must fail closed here rather than 500 the page.
+// 2026-09-08 (second independent review, LOW): an UPPER bound as well. The iteration count is read
+//   straight out of the row, and the row is exactly what a database-write attacker controls. There
+//   was a floor but no ceiling, so setting vault.iterations (or vault_keyslot.iterations) to a
+//   billion made every open of that vault run PBKDF2 for hours - one row edit hangs a PHP worker
+//   per attempt, and the owner cannot open their own vault to fix it. A derivation at the default
+//   450,000 iterations takes roughly a second on a modest server, so this ceiling caps a single
+//   derivation at a few seconds while leaving 4.4x headroom above VAULT_ITER for raising the cost
+//   later. Legitimate rows carry VAULT_ITER, or 100,000 for the oldest vaults; both are far below.
+const VAULT_ITER_MAX = 2000000;
+
 function v_derive($keyword, $salt, $iter) {
     $iter = (int)$iter;
-    if ($iter < 1 || !is_string($salt) || $salt === '') return false;
+    if ($iter < 1 || $iter > VAULT_ITER_MAX || !is_string($salt) || $salt === '') return false;
     return hash_pbkdf2('sha256', $keyword, $salt, $iter, 32, true);
 }
 
 // Encrypt a plaintext string. Returns [iter, salt, nonce, tag, ct] (all raw bytes).
+// 2026-09-08 (second independent review, MEDIUM): bound the plaintext HERE, at the only two doors
+//   into the ciphertext column, rather than in each handler. AES-GCM adds no padding, so the
+//   ciphertext is exactly as long as the payload; the column is varbinary(2048). The create path
+//   capped the PIN and passphrase but no path ever capped word LENGTH, so 24 words of 200
+//   characters produced ~4.9 KB. On a server without STRICT_TRANS_TABLES that is silently
+//   truncated, and because the tag covers the FULL plaintext the vault can never be opened again -
+//   indistinguishable from a forgotten keyword, for the one asset this app exists to preserve.
+//   Both callers already treat false as "self-check failed; nothing changed", so refusing here
+//   fails closed with a message and cannot corrupt anything. Covers every present and future
+//   caller, which is why it is not in the handlers.
+const VAULT_PT_MAX = 1900;   // varbinary(2048) with room for the GCM tag and future fields
+
 function v_encrypt($plaintext, $keyword, $iter) {
+    if (!is_string($plaintext) || strlen($plaintext) > VAULT_PT_MAX) return false;
     $salt  = random_bytes(16);
     $nonce = random_bytes(12);
     $tag   = '';
@@ -82,6 +105,7 @@ function v_unwrap($slot, $keyword) {
 // random salt, because those columns are NOT NULL from the format-1 scheme.
 function v_encrypt_dek($plaintext, $dek) {
     if (!is_string($dek) || strlen($dek) !== 32) return false;
+    if (!is_string($plaintext) || strlen($plaintext) > VAULT_PT_MAX) return false;   // see VAULT_PT_MAX
     $nonce = random_bytes(12);
     $tag   = '';
     $ct    = openssl_encrypt($plaintext, 'aes-256-gcm', $dek, OPENSSL_RAW_DATA, $nonce, $tag, VAULT_AAD_V2, 16);

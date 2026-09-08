@@ -318,10 +318,19 @@ function vault_revoke($con, $row, $actorUid, $kw) {
         mysqli_stmt_bind_param($u, 'issssii', $slot['iter'], $slot['salt'], $slot['nonce'], $slot['tag'], $slot['ct'], $vid, $actorUid);
         if (!mysqli_stmt_execute($u) || mysqli_stmt_affected_rows($u) !== 1) break;
 
-        $v = mysqli_prepare($con, "UPDATE vault SET nonce=?,tag=?,ciphertext=? WHERE id=? AND format=2");
+        // 2026-09-08 (second independent review, HIGH): the owner clause and the affected-rows
+        //   check are NOT redundant with the guard at the top of this function. That guard reads
+        //   $row['owner_id'] from a snapshot taken outside any transaction, and the three
+        //   derivations above spend seconds before this write - long enough for the same owner to
+        //   commit a transfer_confirm from a second session. Without a predicate here the stale
+        //   snapshot would win: this deletes every keyslot but the actor's and re-keys the payload,
+        //   so the NEW owner would be left owning a vault with no keyslot of their own - unopenable
+        //   forever, with the ex-owner holding sole access. Now it affects 0 rows and rolls back.
+        //   The nonce is fresh random on every call, so a successful write always changes the row.
+        $v = mysqli_prepare($con, "UPDATE vault SET nonce=?,tag=?,ciphertext=? WHERE id=? AND format=2 AND user_id=?");
         if (!$v) break;
-        mysqli_stmt_bind_param($v, 'sssi', $body['nonce'], $body['tag'], $body['ct'], $vid);
-        if (!mysqli_stmt_execute($v)) break;
+        mysqli_stmt_bind_param($v, 'sssii', $body['nonce'], $body['tag'], $body['ct'], $vid, $actorUid);
+        if (!mysqli_stmt_execute($v) || mysqli_stmt_affected_rows($v) !== 1) break;
 
         $ci = mysqli_prepare($con, "DELETE FROM vault_invite WHERE vault_id=? AND used_at IS NULL");
         if (!$ci) break;
@@ -386,6 +395,29 @@ function vault_delete($con, $row, $actorUid) {
 // Write an edited payload back. Returns null on success, or an error string.
 // Under format 2 the payload is re-encrypted with the SAME DEK, so everyone else's
 // keyslot keeps working, and a new keyword re-wraps only the caller's own keyslot.
+// 2026-09-08 (internal audit F2, LOW/structural): invite creation was the ONE damaging action with
+//   no engine-level authorization. The handler checked vault_is_owner(), a step-up code and the
+//   keyword - so it was not exploitable - but every other write that can lose or leak a seed
+//   (vault_save, vault_delete, vault_transfer_owner, vault_revoke) re-proves ownership INSIDE the
+//   function that does the writing, precisely so a refactor upstream cannot quietly drop the check.
+//   Handing someone a full key to a seed is the highest-privilege action in the app; it should not
+//   be the only one relying on its caller. Same shape and same return convention as vault_save():
+//   null on success, an error string otherwise, and nothing is written unless the self-check passes.
+function vault_invite_create($con, $row, $uid, $code, $label, $dek) {
+    $vid = (int)$row['id'];
+    if ((int)($row['owner_id'] ?? 0) !== (int)$uid) return 'Only the owner of this vault can invite people to it.';
+    if ((int)$row['format'] !== 2)                  return 'This vault is not on the shared-capable format yet.';
+    $wrap = v_wrap($dek, $code, VAULT_ITER);
+    $lab  = ak_encrypt($label, ak_ctx_label($vid));
+    if ($wrap === false || $lab === false || v_unwrap($wrap, $code) !== $dek) return 'Self-check failed; no invite was created.';
+    $hash = invite_hash($code); $ttl = (int)INVITE_TTL_HOURS;
+    $i = mysqli_prepare($con, "INSERT INTO vault_invite (vault_id,created_by,code_hash,label_enc,iterations,salt,nonce,tag,wrapped_dek,expires_at) VALUES (?,?,?,?,?,?,?,?,?, DATE_ADD(NOW(), INTERVAL ? HOUR))");
+    if (!$i) return 'Could not create the invite.';
+    mysqli_stmt_bind_param($i, 'iississssi', $vid, $uid, $hash, $lab, $wrap['iter'], $wrap['salt'], $wrap['nonce'], $wrap['tag'], $wrap['ct'], $ttl);
+    if (!mysqli_stmt_execute($i) || mysqli_stmt_affected_rows($i) !== 1) return 'Could not create the invite.';
+    return null;
+}
+
 function vault_save($con, $row, $uid, $kw, $newkw, $payload, $dek) {
     $vid = (int)$row['id'];
     // 2026-09-03: SECURITY - only the owner may change what a vault CONTAINS. A guest
@@ -404,10 +436,17 @@ function vault_save($con, $row, $uid, $kw, $newkw, $payload, $dek) {
         }
         $ok = false;
         if (mysqli_begin_transaction($con)) do {   // 2026-09-07 (security review): skip the block if the txn could not start
-            $u = mysqli_prepare($con, "UPDATE vault SET nonce=?,tag=?,ciphertext=? WHERE id=? AND format=2");
+            // 2026-09-08 (second independent review): owner clause + affected-rows check. The
+            //   guard at the top of this function reads a snapshot taken outside the transaction,
+            //   and vault_try_open() spends ~1s before we get here, so an ex-owner racing their own
+            //   transfer could overwrite the seed of a vault they no longer own. This was also the
+            //   only write in the file with neither a scope clause nor a result check, so a
+            //   rejected write (e.g. a payload too long for varbinary(2048) on a strict server)
+            //   committed silently and reported "Vault updated" while the edit was discarded.
+            $u = mysqli_prepare($con, "UPDATE vault SET nonce=?,tag=?,ciphertext=? WHERE id=? AND format=2 AND user_id=?");
             if (!$u) break;
-            mysqli_stmt_bind_param($u, 'sssi', $body['nonce'], $body['tag'], $body['ct'], $vid);
-            if (!mysqli_stmt_execute($u)) break;
+            mysqli_stmt_bind_param($u, 'sssii', $body['nonce'], $body['tag'], $body['ct'], $vid, $uid);
+            if (!mysqli_stmt_execute($u) || mysqli_stmt_affected_rows($u) !== 1) break;
             if ($newslot !== null) {
                 $k = mysqli_prepare($con, "UPDATE vault_keyslot SET iterations=?,salt=?,nonce=?,tag=?,wrapped_dek=?
                                            WHERE vault_id=? AND user_id=?");
@@ -425,10 +464,19 @@ function vault_save($con, $row, $uid, $kw, $newkw, $payload, $dek) {
     $enckw = $newkw !== '' ? $newkw : $kw;
     $rec = v_encrypt($payload, $enckw, VAULT_ITER);
     if ($rec === false || v_decrypt($rec, $enckw) !== $payload) return 'Update self-check failed; nothing changed.';
-    $u = mysqli_prepare($con, "UPDATE vault SET iterations=?,salt=?,nonce=?,tag=?,ciphertext=? WHERE id=? AND user_id=?");
+    // 2026-09-08 (second independent review): AND format=1, plus an affected-rows check. Without
+    //   the format predicate this branch could write a keyword-encrypted payload and a non-zero
+    //   iterations onto a row that a concurrent first-unlock auto-upgrade had just turned into
+    //   format 2 (VAULT_AUTO_UPGRADE is on, and vault_upgrade_v2 correctly guards its own write).
+    //   The keyslot would then unwrap fine while v_decrypt_dek failed, and nothing in the app ever
+    //   tries v_decrypt on a format-2 row - so the vault became permanently unopenable, silently.
+    //   Needs only two of the owner's own sessions (phone unlocking while the laptop saves), so it
+    //   is an accident waiting to happen rather than an attack. 0 rows now returns an error.
+    $u = mysqli_prepare($con, "UPDATE vault SET iterations=?,salt=?,nonce=?,tag=?,ciphertext=? WHERE id=? AND user_id=? AND format=1");
     if (!$u) return 'Could not save changes.';
     mysqli_stmt_bind_param($u, 'issssii', $rec['iter'], $rec['salt'], $rec['nonce'], $rec['tag'], $rec['ct'], $vid, $uid);
-    return mysqli_stmt_execute($u) ? null : 'Could not save changes.';
+    if (!mysqli_stmt_execute($u) || mysqli_stmt_affected_rows($u) !== 1) return 'Could not save changes.';
+    return null;
 }
 
 /* ---- shared access: entropy floor + one-time invite codes (2026-09-03) ---- */
@@ -503,6 +551,16 @@ function cv_leet($s) {
     ]);
 }
 
+/** 2026-09-08 (second independent review): one repeated character, or a straight run through the
+ *  alphabet in either direction. Neither is a word, so neither may earn word credit. */
+function cv_is_repeat_or_run($tok) {
+    $n = strlen($tok);
+    if ($n < 3) return false;
+    if (count(array_unique(str_split($tok))) === 1) return true;          // aaa, zzz
+    $az = 'abcdefghijklmnopqrstuvwxyz';
+    return strpos($az, $tok) !== false || strpos(strrev($az), $tok) !== false;   // bcd, fed
+}
+
 function cv_is_word_shaped($run) {
     $n = strlen($run);
     if ($n < 3) return false;
@@ -561,18 +619,40 @@ function cv_kw_cap($v) {
     $letters  = preg_replace('/[^a-z]/', '', $leet);
 
     $cap = 0;
-    preg_match_all('/[a-z]+|[0-9]+|\s+|[^a-z0-9\s]/u', $leet, $m);
+    // 2026-09-08 (second independent review): \x{FEFF} is grouped WITH whitespace, and the
+    //   separator test carries /u. Both were divergences from the browser twin, and both in the
+    //   dangerous direction - the server scored HIGHER than the meter, so it accepted keywords the
+    //   meter had rejected. The tokeniser's \s+ (with /u) already grouped U+00A0 and U+3000, but
+    //   the separator test below had NO /u, so those tokens fell through to the symbol branch and
+    //   earned ~6 bits each: "q<nbsp>19<nbsp>19<nbsp>cedar<nbsp>zebra<nbsp>7" scored 93 on the
+    //   server and 63 in the browser. U+FEFF was a second, separate case - JavaScript's \s matches
+    //   it and PCRE's does not. Measured over 2,250 candidates by the review: 22 crossed the floor,
+    //   every one of them server-permissive. ⚠️ Keep this class identical to the JS twin's \s.
+    preg_match_all('/[a-z]+|[0-9]+|[\s\x{FEFF}]+|[^a-z0-9\s\x{FEFF}]/u', $leet, $m);
+    $symSeen = [];
     foreach ($m[0] as $tok) {
-        if (preg_match('/^\s+$/', $tok))    continue;                     // separators are free
+        if (preg_match('/^[\s\x{FEFF}]+$/u', $tok)) continue;             // separators are free
         if (preg_match('/^[a-z]+$/', $tok)) {
-            if (cv_is_word_shaped($tok))
+            // 2026-09-08 (second independent review): a letter run that is ONE character repeated
+            //   ("aaa", "zzz") or a straight alphabet run ("bcd") is not a word, whatever its vowel
+            //   ratio - it costs an attacker ~5 bits, not the ~13 a word costs. Without this the
+            //   cap sat ABOVE the base estimate and never bound, so "aaa-bbb-ccc-ddd-eee-fff" and
+            //   "bcd-cde-def-efg-fgh-ghi" both measured 66 and CLEARED the 65-bit floor while
+            //   "correct horse battery staple" was correctly refused at 44.
+            // ⚠️ Deliberately narrow: a token with 2+ distinct, non-consecutive letters ("ebb")
+            //   still earns full word credit, because the app's own 7-word generator emits exactly
+            //   that shape and a broader rule would push generated keywords under their own floor.
+            if (cv_is_repeat_or_run($tok))                  $cap += CV_CB_SEQ;
+            elseif (cv_is_word_shaped($tok))
                 $cap += in_array($tok, CV_KW_BLOCK, true) ? CV_CB_KNOWN : CV_CB_WORD;
-            else
-                $cap += strlen($tok) * $per;
+            else                                            $cap += strlen($tok) * $per;
         } elseif (preg_match('/^[0-9]+$/', $tok)) {
             $cap += cv_digits_cheap($tok) ? CV_CB_SEQ : strlen($tok) * $per;
         } else {
-            $cap += $per;
+            // 2026-09-08: charge each DISTINCT symbol once. Picking "-" as a separator is one
+            //   decision, not one per occurrence; charging it five times gave a patterned keyword
+            //   ~29 bits of headroom purely from its delimiters.
+            if (!isset($symSeen[$tok])) { $symSeen[$tok] = 1; $cap += $per; }
         }
     }
 
@@ -636,6 +716,13 @@ var CV_CB_LETTER=470,CV_CB_DIGIT=332,CV_CB_SYMBOL=450,CV_CB_WORD=1300,CV_CB_KNOW
 function cvLeet(s){var m={'0':'o','1':'i','3':'e','4':'a','5':'s','7':'t','8':'b','@':'a','$':'s'},o='';s=s.toLowerCase();
   for(var i=0;i<s.length;i++)o+=(m[s[i]]||s[i]);return o;}
 function cvWordShaped(r){if(r.length<3)return false;var v=(r.match(/[aeiouy]/g)||[]).length;return v*5>=r.length;}
+/* 2026-09-08: twin of cv_is_repeat_or_run() in PHP. One repeated character, or a straight run
+   through the alphabet either way - neither is a word, so neither earns word credit. */
+function cvRepeatOrRun(t){if(t.length<3)return false;
+  var i,same=true;for(i=1;i<t.length;i++)if(t[i]!==t[0]){same=false;break;}
+  if(same)return true;
+  var az='abcdefghijklmnopqrstuvwxyz';
+  return az.indexOf(t)>=0||az.split('').reverse().join('').indexOf(t)>=0;}
 function cvIsWalk(a){var n=a.length;if(n<4)return false;
   var rows=['qwertyuiop','asdfghjkl','zxcvbnm','1234567890','abcdefghijklmnopqrstuvwxyz'];
   for(var k=0;k<rows.length;k++){var r=rows[k],rr=r.split('').reverse().join('');
@@ -650,14 +737,19 @@ function cvPerChar(v){var cs=0;if(/[a-z]/.test(v))cs+=26;if(/[A-Z]/.test(v))cs+=
 function cvKwCap(v){var chars=Array.from(v),n=chars.length,u={},d=0;
   for(var i=0;i<n;i++)if(!u[chars[i]]){u[chars[i]]=1;d++;}
   var per=cvPerChar(v),leet=cvLeet(v),alnum=leet.replace(/[^a-z0-9]/g,''),letters=leet.replace(/[^a-z]/g,'');
-  var cap=0,toks=leet.match(/[a-z]+|[0-9]+|\s+|[^a-z0-9\s]/gu)||[];
+  /* 2026-09-08 (second independent review): these three rules must stay equivalent to
+     cv_kw_cap() in PHP - U+FEFF grouped with whitespace, a repeat/alphabet-run charged as a
+     sequence rather than a word, and each DISTINCT symbol charged once. The symbol dedupe uses an
+     ARRAY, not an object: sym["constructor"] is truthy from the prototype. */
+  var cap=0,toks=leet.match(/[a-z]+|[0-9]+|[\s﻿]+|[^a-z0-9\s﻿]/gu)||[],sym=[];
   for(var t=0;t<toks.length;t++){var tok=toks[t];
-    if(/^\s+$/.test(tok))continue;
+    if(/^[\s﻿]+$/.test(tok))continue;
     if(/^[a-z]+$/.test(tok)){
-      if(cvWordShaped(tok))cap+=(CV_KW_BLOCK.indexOf(tok)>=0?CV_CB_KNOWN:CV_CB_WORD);
+      if(cvRepeatOrRun(tok))cap+=CV_CB_SEQ;
+      else if(cvWordShaped(tok))cap+=(CV_KW_BLOCK.indexOf(tok)>=0?CV_CB_KNOWN:CV_CB_WORD);
       else cap+=tok.length*per;}
     else if(/^[0-9]+$/.test(tok))cap+=(cvDigitsCheap(tok)?CV_CB_SEQ:tok.length*per);
-    else cap+=per;}
+    else if(sym.indexOf(tok)<0){sym.push(tok);cap+=per;}}
   if(letters!==''&&CV_KW_BLOCK.indexOf(letters)>=0)cap=Math.min(cap,1200);
   if(cvIsWalk(alnum))cap=Math.min(cap,1800);
   if(n>0&&d<=4)cap=Math.min(cap,1200);
@@ -1124,12 +1216,26 @@ if (!auth_is_logged_in($con)) {
                 auth_login_user($uid, $u, user_secret_version($con, $uid));
                 render_backup_codes($codes, $u); exit;
             }
+            reg_release($con);   // 2026-09-08 (2nd review, LOW): do not burn a site-wide sign-up slot on a failed create
             render_register_confirm($u, $b32, 'Could not create account - try again.'); exit;
         }
         render_register_confirm($u, $b32, 'That code did not match - check the app and try again.'); exit;
     }
     if ($__ga === 'login') {
         $u = trim($_POST['username'] ?? '');
+        // 2026-09-08 (second independent review, HIGH): validate the FORMAT before anything is
+        //   recorded. login_throttle_record() below writes this string into
+        //   vault_login_throttle.username_lc - the same column the keyword-failure budget keys as
+        //   "kw:<uid>" - and username_valid() was only ever called on the registration path. So an
+        //   anonymous client could POST username=kw:<uid> and spend that account's keyword budget,
+        //   locking the owner out of their own vault with no self-service remedy. The key
+        //   namespaces in auth.php are now disjoint too; this check is the second layer, not the
+        //   only one. Exits through the IDENTICAL branch an unknown username takes, and a format
+        //   rule is client-checkable anyway, so it leaks nothing new.
+        if (!username_valid($u)) {
+            $_SESSION['cv_login_fails'] = ($_SESSION['cv_login_fails'] ?? 0) + 1;
+            render_login('Invalid username or code.', true, $u); exit;
+        }
         $row = user_find($con, $u);
         // 2026-09-03: the human check is gated on server-side state as well as on the session,
         //   because the session counter alone could be cleared by dropping the cookie. fail_count
@@ -1138,8 +1244,17 @@ if (!auth_is_logged_in($con)) {
         //   unknown usernames made the first response differ (known -> "Invalid username or code.",
         //   unknown -> "Solve the human check"), which enumerated accounts for free. An unknown
         //   name now takes exactly the same path and message as a known-but-ungated one.
+        // 2026-09-08 (second independent review, MEDIUM): the second term used to be
+        //   (int)$row['fail_count'] >= AUTH_CAPTCHA_AFTER, and that RE-OPENED the enumeration this
+        //   block was rewritten to close. fail_count only rises inside `if ($row)`, so it exists
+        //   only for real accounts: an attacker sent three wrong codes for a name, then from a
+        //   FRESH session sent one more, and "Solve the human check" vs "Invalid username or code."
+        //   told them whether the account was real. Removing the `!$row` term in September was
+        //   necessary but not sufficient - the STATE behind the decision was still existence-only.
+        //   login_fail_count() is recorded for every failed attempt whether or not the name
+        //   exists, so both cases now cross the threshold at the same point. See auth.php.
         $needCap = (($_SESSION['cv_login_fails'] ?? 0) >= 1)
-                || (int)($row['fail_count'] ?? 0) >= AUTH_CAPTCHA_AFTER;
+                || login_fail_count($con, $u) >= AUTH_CAPTCHA_AFTER;
         if ($needCap && !captcha_check($_POST['captcha'] ?? '')) {
             $_SESSION['cv_login_fails'] = ($_SESSION['cv_login_fails'] ?? 0) + 1;
             render_login('Solve the human check below, then try again.', true, $u); exit;
@@ -1171,10 +1286,22 @@ if (!auth_is_logged_in($con)) {
         // $row is the pre-login snapshot, so read the version back rather than trusting it:
         // a backup code was possibly just consumed, but the version cannot have moved.
         if ($ok) {
-            user_migrate_secret($con, $row);   // re-encrypt a legacy (unbound) secret_blob context-bound, on first login after upgrade
+            // 2026-09-08 (2nd review): the user_migrate_secret() call that stood here is gone. Every
+            //   secret_blob is context-bound as of the 2026-09-08 migration and ak_decrypt() has no
+            //   legacy fallback left, so there is nothing to migrate on login any more. See auth.php.
             $_SESSION['cv_login_fails'] = 0; $dest = auth_after_login_url(); auth_login_user($uid, $row['username'], user_secret_version($con, $uid)); header('Location: ' . $dest); exit;
         }
-        if ($row) user_fail($con, $row['id']);   // sign-in failure bumps the CAPTCHA counter but no longer arms lock_until (see user_fail)
+        // 2026-09-08 (second independent review): the sign-in path no longer touches fail_count at
+        //   all. It used to call user_fail() here purely to drive the CAPTCHA, which had two bad
+        //   consequences. (1) fail_count is existence-only state, so using it as the CAPTCHA
+        //   trigger enumerated accounts - see $needCap above. (2) fail_count is ALSO what the
+        //   step-up path reads to arm lock_until, so an outsider could sit at the login form
+        //   posting wrong codes to pre-load the counter to AUTH_MAX_FAILS-1, and the owner's very
+        //   next step-up slip would lock their own security controls (sign-out-others, re-pair,
+        //   revoke) for AUTH_LOCK_SECS. The $armLock=false default stopped sign-in ARMING the lock
+        //   but not sign-in FEEDING it. fail_count is now purely the step-up counter, which an
+        //   outsider cannot reach at all, and the CAPTCHA runs off the "f:" namespace instead.
+        login_fail_record($con, $u);
         $_SESSION['cv_login_fails'] = ($_SESSION['cv_login_fails'] ?? 0) + 1;
         render_login('Invalid username or code.', true, $u); exit;
     }
@@ -1197,16 +1324,31 @@ $__uid = (int)auth_uid();
 //   the range predicate, so this stays O(rows purged) rather than a scan of the whole table.
 mysqli_query($con, "DELETE FROM vault_invite WHERE used_at IS NULL AND expires_at < NOW()");
 
-/* ===== 2026-09-08 (internal audit, L1): ONE keyword-attempt gate for every POST =====
-   The same one-gate reasoning as the CSRF check and the reference translation. Anything carrying a
-   keyword is refused while this account's failure budget is spent, so a stolen session cannot be
-   used as an unlimited keyword oracle. Only WRONG keywords are ever recorded (see the handlers
-   below), so a legitimate owner never meets this however much they use their vault, and it never
-   fully locks - one attempt per KW_THROTTLE_INTERVAL always gets through. */
+/* ===== 2026-09-08 (internal audit, L1): ONE keyword gate for every POST =====
+   The same one-gate reasoning as the CSRF check and the reference translation. TWO budgets are
+   checked here, and they exist for different reasons - do not merge them:
+
+   kw: (L1)   counts only WRONG keywords, so a stolen session cannot be used as an unlimited
+              keyword oracle. A legitimate owner never meets it however much they use their
+              vault, which is exactly why it cannot also serve as a cost limit.
+   w:  (HIGH, 2026-09-08 second independent review)
+              counts EVERY keyword-bearing POST whatever the outcome, because the expensive
+              requests are the ones that SUCCEED. An `update` with a correct keyword performed up
+              to 27 PBKDF2 derivations - enough to exceed PHP's default max_execution_time on a
+              typical server - and recorded nothing, so any account that could
+              register was an unmetered CPU amplifier against the whole hosting account. Charged
+              here rather than in each handler for the same reason the gate itself is here: a new
+              action cannot be added and left unmetered by accident.
+
+   Neither ever fully locks - one operation per interval always gets through. Charging happens
+   BEFORE the work, not after, so a request killed part-way still paid for itself. */
 if ($action !== '' && (isset($_POST['keyword']) || isset($_POST['new_keyword']))) {
-    $__kwWait = kw_fail_wait($con, $__uid);
-    if ($__kwWait > 0) {
+    $__kwMsg = null; $__kwWait = 0;
+    if (($__kwWait = kw_fail_wait($con, $__uid)) > 0)
         $__kwMsg = 'Too many wrong keywords - wait '.$__kwWait.'s, then try again.';
+    elseif (($__kwWait = kw_work_wait($con, $__uid)) > 0)
+        $__kwMsg = 'Too many vault operations - wait '.$__kwWait.'s, then try again.';
+    if ($__kwMsg !== null) {
         if (($_POST['ajax'] ?? '') === '1') {
             header('Content-Type: application/json');
             echo json_encode(['ok' => false, 'err' => $__kwMsg]);
@@ -1215,7 +1357,8 @@ if ($action !== '' && (isset($_POST['keyword']) || isset($_POST['new_keyword']))
         $_SESSION['cv_flash'] = $__kwMsg;
         header('Location: ' . APP_BASE); exit;
     }
-    unset($__kwWait);
+    kw_work_record($con, $__uid);
+    unset($__kwWait, $__kwMsg);
 }
 
 /* ===== 2026-09-06: opaque references -> row ids. ONE translation for every POST =====
@@ -1716,14 +1859,8 @@ if ($action === 'invite_create') {
     if ($open === false)              { kw_fail_record($con, $__uid); render_invite_form($vid, $label, 'Wrong keyword - no invite was created.'); exit; }
     if ((int)$row['format'] !== 2)    { render_invite_form($vid, $label, 'This vault is not on the shared-capable format yet. Unlock it once to upgrade it, then try again.'); exit; }
     $code = invite_new_code();
-    $wrap = v_wrap($open[1], $code, VAULT_ITER);
-    $lab  = ak_encrypt($label, ak_ctx_label($vid));
-    if ($wrap === false || $lab === false || v_unwrap($wrap, $code) !== $open[1]) { render_invite_form($vid, $label, 'Self-check failed; no invite was created.'); exit; }
-    $hash = invite_hash($code); $ttl = (int)INVITE_TTL_HOURS;
-    $i = mysqli_prepare($con, "INSERT INTO vault_invite (vault_id,created_by,code_hash,label_enc,iterations,salt,nonce,tag,wrapped_dek,expires_at) VALUES (?,?,?,?,?,?,?,?,?, DATE_ADD(NOW(), INTERVAL ? HOUR))");
-    if (!$i) { render_invite_form($vid, $label, 'Could not create the invite.'); exit; }
-    mysqli_stmt_bind_param($i, 'iississssi', $vid, $__uid, $hash, $lab, $wrap['iter'], $wrap['salt'], $wrap['nonce'], $wrap['tag'], $wrap['ct'], $ttl);
-    if (!mysqli_stmt_execute($i)) { render_invite_form($vid, $label, 'Could not create the invite.'); exit; }
+    $err3 = vault_invite_create($con, $row, $__uid, $code, $label, $open[1]);
+    if ($err3 !== null) { render_invite_form($vid, $label, $err3); exit; }
     render_invite_code($code, $label); exit;
 }
 
@@ -1817,7 +1954,13 @@ elseif ($action === 'unlock') {
             // 2026-09-03: existing keywords predate the floor. Measure in memory and
             //   nudge - never blocking, never stored, never logged.
             $__kwBits = cv_entropy($kw);
-            if ($__kwBits < MIN_KEYSLOT_BITS) $notice = 'Your keyword measures about '.$__kwBits.' bits. New keywords now need ~'.MIN_KEYSLOT_BITS.'. Consider changing it: Edit, then New keyword.';
+            // 2026-09-08 (second independent review, HIGH): this used to advise "Edit, then New
+            //   keyword", which does NOT retire the weak keyword. Setting a new keyword re-wraps
+            //   the existing data key rather than replacing it, so anyone holding an old copy of
+            //   this vault's rows plus the OLD keyword can still read it, and every later edit,
+            //   indefinitely. Until a real re-key exists, the honest remedy is a new vault. Plain
+            //   language only here - UI copy never names internal mechanisms.
+            if ($__kwBits < MIN_KEYSLOT_BITS) $notice = 'Your keyword measures about '.$__kwBits.' bits. New keywords now need ~'.MIN_KEYSLOT_BITS.'. Changing the keyword on this vault does not retire the old one - to replace it properly, create a new vault with a stronger keyword, copy this phrase into it, then delete this vault.';
             // 2026-09-03: transparent migration to the shared-capable format, gated by config.
             //   A failure here is harmless: the vault stays format 1 and is already revealed.
             if (VAULT_AUTO_UPGRADE && (int)$row['format'] === 1
@@ -1879,6 +2022,16 @@ elseif ($action === 'update') {
         $err = 'A recovery phrase must be ' . seed_lengths_text() . ' words - this one has ' . count($words) . '.';
     elseif (in_array('', $words, true))
         $err = 'There is a gap in the words. Fill every slot.';
+    // 2026-09-08 (second independent review): the SAME length caps the create path has carried
+    //   since 2026-09-07. This handler had none, so an over-long passphrase produced a payload
+    //   bigger than varbinary(2048): on a non-strict server MySQL truncates it, the GCM tag then
+    //   never verifies again and the vault is permanently unopenable while the UI says "updated".
+    //   vault_save() now also checks affected_rows, so a strict server's rejection is no longer
+    //   silent - but the payload must be bounded on the way in, not just caught on the way out.
+    elseif (strlen($pin) > 128)
+        $err = 'PIN is too long (max 128 characters). Nothing was changed.';
+    elseif (strlen($pass) > 512)
+        $err = 'Passphrase is too long (max 512 characters). Nothing was changed.';
     else {
         // 2026-09-03: find it among the vaults this user can open (owner OR keyslot holder),
         //   so someone sharing the vault can save edits too. Access is proven by the keyword.
@@ -2341,6 +2494,12 @@ elseif ($action === 'invite_cancel') {
     var rb=document.getElementById('revealbox'); if(rb)rb.style.display='none';
     var rh=document.getElementById('revealhint'); if(rh)rh.style.display='none';
     var n=document.getElementById('relocknote'); if(n)n.style.display='flex';
+    /* 2026-09-08 (owner, during the second review): clear the unlock notices too. The
+       keyword-strength nudge is appended to #unlockmsg and SURVIVED the auto-lock, so a locked
+       screen kept announcing "your keyword measures about N bits" - telling anyone who walks up
+       that this vault's keyword is weak, in exactly the state the 60-second lock exists to
+       protect. Same class as the strength meter that used to linger after "Clear all". */
+    var um=document.getElementById('unlockmsg'); if(um)um.innerHTML='';
     masked=true;
   }
   // bind the keep-alive, but do NOT start the timer on load: the box exists (hidden)
