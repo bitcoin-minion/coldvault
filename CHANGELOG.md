@@ -98,11 +98,23 @@ Known limitation, and it errs toward refusing: with no dictionary to consult, a 
 with a plausible vowel ratio is charged as one unknown word whether or not it is one. A random
 letters-only keyword may therefore be refused. Prefer **Generate**.
 
-All five copies of the estimator — server, page script, and `tools/kwcheck.php` — were replaced
-together and cross-checked over **3,414 candidates including multibyte and emoji with zero
-disagreement**, so the strength meter can never show a number the server then refuses. The
-arithmetic is integer hundredths-of-a-bit against a shared table rather than floating-point
-`log()`, which is what makes that guarantee hold. `kwcheck.php --selftest` covers the new vectors.
+The estimator was replaced in the server, the page script and `tools/kwcheck.php` together, and
+cross-checked over **3,414 candidates including multibyte and emoji with zero disagreement**. The
+arithmetic is integer hundredths-of-a-bit against a shared table rather than floating-point `log()`,
+which is what makes that guarantee hold. `kwcheck.php --selftest` covers the new vectors.
+
+**A sixth copy was missed on the first pass and is now fixed.** `rEnt()` — the strength meter on the
+**redeem** page, where a guest chooses their own keyword to join a shared vault — still held the old
+formula, so it showed `qwertyuiop123!` as "~86 bits, accepted" while the server refused it at ~18.
+It failed safe, because the server always decides, but the meter lied. It was missed because it was
+searched for by function name (`cv_entropy`, `cvEntropy`) rather than by formula, and this one was
+called something else — the comment above it even read "keep all three in step".
+
+Rather than add a fourth copy, the two browser-side emissions now come from **one** PHP function,
+`cv_kw_meter_js()`: the main page used to print the estimator as raw output while `render_redeem()`
+built its own inside a string concatenation, which is exactly how they drifted. One source, two
+emissions — they cannot diverge again. Verified: the emitted JavaScript agrees with the server over
+the same 3,414 candidates, and the redeem page's fully assembled script block parses cleanly.
 
 ## 2026-09-06
 

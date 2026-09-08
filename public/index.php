@@ -608,6 +608,71 @@ function cv_entropy($v) {
     $cap = cv_kw_cap($v);
     return (int)round(min($cb, $cap) / 100);
 }
+// 2026-09-08 (internal audit F1): the browser-side twin of cv_entropy(), returned as text so
+//   that BOTH pages that show a strength meter emit the SAME code. They used not to: the main
+//   page printed it as raw output while render_redeem() built its own copy called rEnt() inside
+//   a string, and when the estimator was rewritten only the first was updated - so the redeem
+//   meter told a guest "~86 bits, accepted" for a keyboard walk the server then refused at ~18.
+//   One source, two emissions: they cannot drift again. Must stay numerically identical to
+//   cv_entropy() above - the cross-check is 3,414 candidates including multibyte and emoji.
+function cv_kw_meter_js() {
+    return <<<'CVJS'
+var CV_KW_BLOCK=['password','passwort','contrasena','pass','passw0rd','p4ssword','letmein','welcome','admin',
+'administrator','root','toor','login','logon','user','guest','test','testing','demo','sample',
+'qwerty','qwertyuiop','qwertz','azerty','asdf','asdfgh','asdfghjk','zxcv','zxcvbn','wasd',
+'abc','abcd','abcde','abcdef','iloveyou','trustno','starwars','superman','batman','pokemon',
+'football','baseball','basketball','soccer','hockey','sunshine','princess','flower','butterfly',
+'chocolate','cookie','freedom','whatever','nothing','secret','private','hidden','safe','secure',
+'money','cash','bank','wallet','seed','phrase','mnemonic','recovery','backup','vault','coldvault',
+'bitcoin','satoshi','crypto','blockchain','hodl','moon','mining','miner','hash','block',
+'summer','winter','spring','autumn','fall','january','february','march','april','june','july',
+'august','september','october','november','december','monday','friday','today','tomorrow',
+'dragon','monkey','shadow','master','ninja','hunter','killer','ranger','tigger','charlie',
+'jordan','michael','jennifer','thomas','robert','daniel','matthew','george','ashley','amanda',
+'computer','internet','google','samsung','apple','windows','linux','server','database','oracle',
+'liverpool','arsenal','chelsea','barcelona','madrid','manchester','love','hello','world','yes','no'];
+var CV_LOG2={10:332,26:470,33:504,36:517,43:543,52:570,59:588,62:595,69:611,85:641,95:657};
+var CV_CB_LETTER=470,CV_CB_DIGIT=332,CV_CB_SYMBOL=450,CV_CB_WORD=1300,CV_CB_KNOWN=700,CV_CB_SEQ=700;
+function cvLeet(s){var m={'0':'o','1':'i','3':'e','4':'a','5':'s','7':'t','8':'b','@':'a','$':'s'},o='';s=s.toLowerCase();
+  for(var i=0;i<s.length;i++)o+=(m[s[i]]||s[i]);return o;}
+function cvWordShaped(r){if(r.length<3)return false;var v=(r.match(/[aeiouy]/g)||[]).length;return v*5>=r.length;}
+function cvIsWalk(a){var n=a.length;if(n<4)return false;
+  var rows=['qwertyuiop','asdfghjkl','zxcvbnm','1234567890','abcdefghijklmnopqrstuvwxyz'];
+  for(var k=0;k<rows.length;k++){var r=rows[k],rr=r.split('').reverse().join('');
+    for(var len=n;len>=4;len--)for(var i=0;i+len<=n;i++){var seg=a.substr(i,len);
+      if(len*10>=n*7&&(r.indexOf(seg)>=0||rr.indexOf(seg)>=0))return true;}}
+  return false;}
+function cvDigitsCheap(d){var n=d.length;if(n>=2){var u={},c=0;for(var i=0;i<n;i++)if(!u[d[i]]){u[d[i]]=1;c++;}if(c===1)return true;}
+  if(n===4&&(d.substr(0,2)==='19'||d.substr(0,2)==='20'))return true;
+  if(n>=3&&('1234567890'.indexOf(d)>=0||'0987654321'.indexOf(d)>=0))return true;return false;}
+function cvPerChar(v){var cs=0;if(/[a-z]/.test(v))cs+=26;if(/[A-Z]/.test(v))cs+=26;
+  if(/[0-9]/.test(v))cs+=10;if(/[^A-Za-z0-9]/.test(v))cs+=33;return CV_LOG2[cs]||100;}
+function cvKwCap(v){var chars=Array.from(v),n=chars.length,u={},d=0;
+  for(var i=0;i<n;i++)if(!u[chars[i]]){u[chars[i]]=1;d++;}
+  var per=cvPerChar(v),leet=cvLeet(v),alnum=leet.replace(/[^a-z0-9]/g,''),letters=leet.replace(/[^a-z]/g,'');
+  var cap=0,toks=leet.match(/[a-z]+|[0-9]+|\s+|[^a-z0-9\s]/gu)||[];
+  for(var t=0;t<toks.length;t++){var tok=toks[t];
+    if(/^\s+$/.test(tok))continue;
+    if(/^[a-z]+$/.test(tok)){
+      if(cvWordShaped(tok))cap+=(CV_KW_BLOCK.indexOf(tok)>=0?CV_CB_KNOWN:CV_CB_WORD);
+      else cap+=tok.length*per;}
+    else if(/^[0-9]+$/.test(tok))cap+=(cvDigitsCheap(tok)?CV_CB_SEQ:tok.length*per);
+    else cap+=per;}
+  if(letters!==''&&CV_KW_BLOCK.indexOf(letters)>=0)cap=Math.min(cap,1200);
+  if(cvIsWalk(alnum))cap=Math.min(cap,1800);
+  if(n>0&&d<=4)cap=Math.min(cap,1200);
+  return cap;}
+function cvEntropy(v){if(!v)return 0;
+  var chars=Array.from(v),n=chars.length,u={},dd=0;
+  for(var i=0;i<n;i++)if(!u[chars[i]]){u[chars[i]]=1;dd++;}
+  var t=v.split(/[^A-Za-z0-9]+/).filter(function(x){return x.length>=3&&/^[A-Za-z]+$/.test(x);}),cb;
+  if(t.length>=3){var w=[];t.forEach(function(x){var k=x.toLowerCase();if(w.indexOf(k)<0)w.push(k);});
+    cb=w.length*1100;if(/[A-Z]/.test(v))cb+=200;if(/[0-9]/.test(v))cb+=300;if(/[^A-Za-z0-9 \-]/.test(v))cb+=400;}
+  else{cb=Math.min(n,2*dd)*cvPerChar(v);}
+  return Math.round(Math.min(cb,cvKwCap(v))/100);}
+CVJS;
+}
+
 
 
 // 24 symbols from a 32-character alphabet with no I and no O, so nothing is mistaken
@@ -1441,9 +1506,9 @@ function render_redeem($err = null, $msg = null, $code = '') {
       . '<script nonce="'.CSP_NONCE.'">'
       // 2026-09-03: same repetition fix as cvEntropy() and cv_entropy() - distinct words,
       //   and a repetition cap on the character fallback. Keep all three in step.
-      . 'function rEnt(v){if(!v)return 0;var t=v.split(/[^A-Za-z0-9]+/).filter(function(x){return x.length>=3&&/^[A-Za-z]+$/.test(x);});var b;if(t.length>=3){var u=[];t.forEach(function(x){var k=x.toLowerCase();if(u.indexOf(k)<0)u.push(k);});b=u.length*11;if(/[A-Z]/.test(v))b+=2;if(/[0-9]/.test(v))b+=3;if(/[^A-Za-z0-9 \-]/.test(v))b+=4;}else{var c=0;if(/[a-z]/.test(v))c+=26;if(/[A-Z]/.test(v))c+=26;if(/[0-9]/.test(v))c+=10;if(/[^A-Za-z0-9]/.test(v))c+=33;var d=0;for(var i=0;i<v.length;i++)if(v.indexOf(v[i])===i)d++;b=Math.min(v.length,2*d)*Math.log2(c||2);}return Math.round(b);}'
+      . cv_kw_meter_js()
       . 'var MIN='.$min.';'
-      . 'function rShow(){var v=document.getElementById("rk").value,s=document.getElementById("rstrength"),b=rEnt(v),ok=b>=MIN;'
+      . 'function rShow(){var v=document.getElementById("rk").value,s=document.getElementById("rstrength"),b=cvEntropy(v),ok=b>=MIN;'
       . 's.innerHTML=v.length?("strength &mdash; <span style=\"color:"+(ok?"var(--accent)":"var(--danger)")+"\">~"+b+" bits</span> &middot; "+(ok?"accepted":"too weak, needs ~"+MIN)):"strength &mdash; enter a keyword";}'
       . 'document.getElementById("rk").addEventListener("input",rShow);'
       . 'function rGen(){var W=window.CV_WORDS,kw;if(W&&W.length){var r=new Uint32Array(7),o=[];crypto.getRandomValues(r);for(var i=0;i<7;i++)o.push(W[r[i]%W.length]);kw=o.join("-");}else{var c="abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789",r2=new Uint32Array(24);crypto.getRandomValues(r2);kw=[].map.call(r2,function(x){return c[x%c.length];}).join("");}'
@@ -2198,59 +2263,7 @@ elseif ($action === 'invite_cancel') {
   //   and emoji, zero disagreements (2026-09-08).
   // 2026-09-08 (internal audit F1): see cv_entropy() in PHP. Integer centibits, shared
   //   table, no Math.log2 - this copy must return the SAME number as the server.
-var CV_KW_BLOCK=['password','passwort','contrasena','pass','passw0rd','p4ssword','letmein','welcome','admin',
-'administrator','root','toor','login','logon','user','guest','test','testing','demo','sample',
-'qwerty','qwertyuiop','qwertz','azerty','asdf','asdfgh','asdfghjk','zxcv','zxcvbn','wasd',
-'abc','abcd','abcde','abcdef','iloveyou','trustno','starwars','superman','batman','pokemon',
-'football','baseball','basketball','soccer','hockey','sunshine','princess','flower','butterfly',
-'chocolate','cookie','freedom','whatever','nothing','secret','private','hidden','safe','secure',
-'money','cash','bank','wallet','seed','phrase','mnemonic','recovery','backup','vault','coldvault',
-'bitcoin','satoshi','crypto','blockchain','hodl','moon','mining','miner','hash','block',
-'summer','winter','spring','autumn','fall','january','february','march','april','june','july',
-'august','september','october','november','december','monday','friday','today','tomorrow',
-'dragon','monkey','shadow','master','ninja','hunter','killer','ranger','tigger','charlie',
-'jordan','michael','jennifer','thomas','robert','daniel','matthew','george','ashley','amanda',
-'computer','internet','google','samsung','apple','windows','linux','server','database','oracle',
-'liverpool','arsenal','chelsea','barcelona','madrid','manchester','love','hello','world','yes','no'];
-var CV_LOG2={10:332,26:470,33:504,36:517,43:543,52:570,59:588,62:595,69:611,85:641,95:657};
-var CV_CB_LETTER=470,CV_CB_DIGIT=332,CV_CB_SYMBOL=450,CV_CB_WORD=1300,CV_CB_KNOWN=700,CV_CB_SEQ=700;
-function cvLeet(s){var m={'0':'o','1':'i','3':'e','4':'a','5':'s','7':'t','8':'b','@':'a','$':'s'},o='';s=s.toLowerCase();
-  for(var i=0;i<s.length;i++)o+=(m[s[i]]||s[i]);return o;}
-function cvWordShaped(r){if(r.length<3)return false;var v=(r.match(/[aeiouy]/g)||[]).length;return v*5>=r.length;}
-function cvIsWalk(a){var n=a.length;if(n<4)return false;
-  var rows=['qwertyuiop','asdfghjkl','zxcvbnm','1234567890','abcdefghijklmnopqrstuvwxyz'];
-  for(var k=0;k<rows.length;k++){var r=rows[k],rr=r.split('').reverse().join('');
-    for(var len=n;len>=4;len--)for(var i=0;i+len<=n;i++){var seg=a.substr(i,len);
-      if(len*10>=n*7&&(r.indexOf(seg)>=0||rr.indexOf(seg)>=0))return true;}}
-  return false;}
-function cvDigitsCheap(d){var n=d.length;if(n>=2){var u={},c=0;for(var i=0;i<n;i++)if(!u[d[i]]){u[d[i]]=1;c++;}if(c===1)return true;}
-  if(n===4&&(d.substr(0,2)==='19'||d.substr(0,2)==='20'))return true;
-  if(n>=3&&('1234567890'.indexOf(d)>=0||'0987654321'.indexOf(d)>=0))return true;return false;}
-function cvPerChar(v){var cs=0;if(/[a-z]/.test(v))cs+=26;if(/[A-Z]/.test(v))cs+=26;
-  if(/[0-9]/.test(v))cs+=10;if(/[^A-Za-z0-9]/.test(v))cs+=33;return CV_LOG2[cs]||100;}
-function cvKwCap(v){var chars=Array.from(v),n=chars.length,u={},d=0;
-  for(var i=0;i<n;i++)if(!u[chars[i]]){u[chars[i]]=1;d++;}
-  var per=cvPerChar(v),leet=cvLeet(v),alnum=leet.replace(/[^a-z0-9]/g,''),letters=leet.replace(/[^a-z]/g,'');
-  var cap=0,toks=leet.match(/[a-z]+|[0-9]+|\s+|[^a-z0-9\s]/gu)||[];
-  for(var t=0;t<toks.length;t++){var tok=toks[t];
-    if(/^\s+$/.test(tok))continue;
-    if(/^[a-z]+$/.test(tok)){
-      if(cvWordShaped(tok))cap+=(CV_KW_BLOCK.indexOf(tok)>=0?CV_CB_KNOWN:CV_CB_WORD);
-      else cap+=tok.length*per;}
-    else if(/^[0-9]+$/.test(tok))cap+=(cvDigitsCheap(tok)?CV_CB_SEQ:tok.length*per);
-    else cap+=per;}
-  if(letters!==''&&CV_KW_BLOCK.indexOf(letters)>=0)cap=Math.min(cap,1200);
-  if(cvIsWalk(alnum))cap=Math.min(cap,1800);
-  if(n>0&&d<=4)cap=Math.min(cap,1200);
-  return cap;}
-function cvEntropy(v){if(!v)return 0;
-  var chars=Array.from(v),n=chars.length,u={},dd=0;
-  for(var i=0;i<n;i++)if(!u[chars[i]]){u[chars[i]]=1;dd++;}
-  var t=v.split(/[^A-Za-z0-9]+/).filter(function(x){return x.length>=3&&/^[A-Za-z]+$/.test(x);}),cb;
-  if(t.length>=3){var w=[];t.forEach(function(x){var k=x.toLowerCase();if(w.indexOf(k)<0)w.push(k);});
-    cb=w.length*1100;if(/[A-Z]/.test(v))cb+=200;if(/[0-9]/.test(v))cb+=300;if(/[^A-Za-z0-9 \-]/.test(v))cb+=400;}
-  else{cb=Math.min(n,2*dd)*cvPerChar(v);}
-  return Math.round(Math.min(cb,cvKwCap(v))/100);}
+<?php echo cv_kw_meter_js();?>
   const ck=document.getElementById('ck');
   if(ck)ck.addEventListener('input',e=>{const v=e.target.value,s=document.getElementById('strength');var b=cvEntropy(v),label,col;if(!v.length){label='enter a keyword';col='var(--faint)';}else if(b<36){label='weak';col='var(--danger)';}else if(b<56){label='fair';col='var(--amber)';}else if(b<75){label='strong';col='var(--accent)';}else{label='very strong';col='var(--accent)';}s.innerHTML='strength — <span style="color:'+col+'">'+label+'</span>'+(v.length?' · ~'+b+' bits · '+v.length+' chars · '+(b>=CV_MIN?'<span style="color:var(--accent)">accepted</span>':'<span style="color:var(--danger)">below the ~'+CV_MIN+'-bit minimum</span>'):'');});
   // 2026-09-03: success banners auto-dismiss after 10s, or on click. Errors
