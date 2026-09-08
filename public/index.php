@@ -625,6 +625,17 @@ function cv_is_repeat_or_run($tok) {
     return strpos($az, $tok) !== false || strpos(strrev($az), $tok) !== false;   // bcd, fed
 }
 
+/** 2026-09-08 (Pass 6): the longest run of characters two tokens share at the START or at the
+ *  END. Used to charge a token only for its novel part - see the note in cv_kw_cap(). Plain
+ *  byte comparison on ASCII lowercase, which is all cv_leet() can produce here, so PHP and the
+ *  JS twin agree by construction. ⚠️ Must stay identical to cvAffix() in the browser copy. */
+function cv_affix($a, $b) {
+    $n = min(strlen($a), strlen($b));
+    $i = 0; while ($i < $n && $a[$i] === $b[$i]) $i++;
+    $j = 0; while ($j < $n && $a[strlen($a)-1-$j] === $b[strlen($b)-1-$j]) $j++;
+    return $i > $j ? $i : $j;
+}
+
 function cv_is_word_shaped($run) {
     $n = strlen($run);
     if ($n < 3) return false;
@@ -693,10 +704,36 @@ function cv_kw_cap($v) {
     //   it and PCRE's does not. Measured over 2,250 candidates by the review: 22 crossed the floor,
     //   every one of them server-permissive. ⚠️ Keep this class identical to the JS twin's \s.
     preg_match_all('/[a-z]+|[0-9]+|[\s\x{FEFF}]+|[^a-z0-9\s\x{FEFF}]/u', $leet, $m);
-    $symSeen = [];
+    $symSeen = []; $capSeen = [];
     foreach ($m[0] as $tok) {
         if (preg_match('/^[\s\x{FEFF}]+$/u', $tok)) continue;             // separators are free
         if (preg_match('/^[a-z]+$/', $tok)) {
+            /* 2026-09-08 (Pass 6): charge a token only for what is NEW relative to the tokens
+               before it. Every rule above scores each token in ISOLATION, so a family of related
+               tokens was charged as if the members were independent - which is what let two shapes
+               clear the 65-bit floor while being trivially enumerable:
+                 "aab-aac-aad-aae-aaf-aag"      measured 66 (6 "words" x 11 bits)
+                 "zzz zzz1 zzz2 zzz3 zzz4 zzz5" measured 84
+               Both are one stem plus a counter, worth nowhere near that. The novel part of a token
+               is its length minus the longest prefix OR suffix it shares with any earlier token, so
+               "aac" after "aab" costs one character rather than a whole word.
+               ⚠️ min(), never max(): sharing an affix can only LOWER a charge. That is what keeps
+               real keywords untouched - a six-letter word sharing a three-letter suffix still has
+               three novel characters, which costs MORE than a word, so it stays at the word price.
+               Measured before shipping: across 423 candidates every change was downward and NOTHING
+               became newly acceptable; across 20,000 simulated Generate outputs there was no
+               additional failure. Re-measure both if you touch this.
+               Known and deliberate: this catches MECHANICAL families - shared affixes, counters,
+               repeats. It does NOT catch SEMANTIC ones, so "one-two-three-four-five-six" and
+               "red-orange-yellow-green-blue-indigo" still score 66 and are still accepted. Six
+               distinct word tokens floor the base estimate at 66, and separating a real six-word
+               passphrase from a named category needs category dictionaries, not arithmetic. */
+            $novel = strlen($tok);
+            foreach ($capSeen as $prev) {
+                $shared = cv_affix($prev, $tok);
+                if (strlen($tok) - $shared < $novel) $novel = strlen($tok) - $shared;
+            }
+            $capSeen[] = $tok;
             // 2026-09-08 (second independent review): a letter run that is ONE character repeated
             //   ("aaa", "zzz") or a straight alphabet run ("bcd") is not a word, whatever its vowel
             //   ratio - it costs an attacker ~5 bits, not the ~13 a word costs. Without this the
@@ -706,10 +743,11 @@ function cv_kw_cap($v) {
             // ⚠️ Deliberately narrow: a token with 2+ distinct, non-consecutive letters ("ebb")
             //   still earns full word credit, because the app's own 7-word generator emits exactly
             //   that shape and a broader rule would push generated keywords under their own floor.
-            if (cv_is_repeat_or_run($tok))                  $cap += CV_CB_SEQ;
+            if (cv_is_repeat_or_run($tok))                  $charge = CV_CB_SEQ;
             elseif (cv_is_word_shaped($tok))
-                $cap += in_array($tok, CV_KW_BLOCK, true) ? CV_CB_KNOWN : CV_CB_WORD;
-            else                                            $cap += strlen($tok) * $per;
+                $charge = in_array($tok, CV_KW_BLOCK, true) ? CV_CB_KNOWN : CV_CB_WORD;
+            else                                            $charge = strlen($tok) * $per;
+            $cap += min($charge, $novel * $per);            // see the novelty note above
         } elseif (preg_match('/^[0-9]+$/', $tok)) {
             $cap += cv_digits_cheap($tok) ? CV_CB_SEQ : strlen($tok) * $per;
         } else {
@@ -779,6 +817,12 @@ var CV_LOG2={10:332,26:470,33:504,36:517,43:543,52:570,59:588,62:595,69:611,85:6
 var CV_CB_LETTER=470,CV_CB_DIGIT=332,CV_CB_SYMBOL=450,CV_CB_WORD=1300,CV_CB_KNOWN=700,CV_CB_SEQ=700;
 function cvLeet(s){var m={'0':'o','1':'i','3':'e','4':'a','5':'s','7':'t','8':'b','@':'a','$':'s'},o='';s=s.toLowerCase();
   for(var i=0;i<s.length;i++)o+=(m[s[i]]||s[i]);return o;}
+/* 2026-09-08 (Pass 6): twin of cv_affix() in PHP - the longest run two tokens share at the
+   START or the END. ⚠️ Keep identical; the server ENFORCES the floor this feeds. */
+function cvAffix(a,b){var n=Math.min(a.length,b.length),i=0,j=0;
+  while(i<n&&a.charAt(i)===b.charAt(i))i++;
+  while(j<n&&a.charAt(a.length-1-j)===b.charAt(b.length-1-j))j++;
+  return i>j?i:j;}
 function cvWordShaped(r){if(r.length<3)return false;var v=(r.match(/[aeiouy]/g)||[]).length;return v*5>=r.length;}
 /* 2026-09-08: twin of cv_is_repeat_or_run() in PHP. One repeated character, or a straight run
    through the alphabet either way - neither is a word, so neither earns word credit. */
@@ -805,13 +849,20 @@ function cvKwCap(v){var chars=Array.from(v),n=chars.length,u={},d=0;
      cv_kw_cap() in PHP - U+FEFF grouped with whitespace, a repeat/alphabet-run charged as a
      sequence rather than a word, and each DISTINCT symbol charged once. The symbol dedupe uses an
      ARRAY, not an object: sym["constructor"] is truthy from the prototype. */
-  var cap=0,toks=leet.match(/[a-z]+|[0-9]+|[\s﻿]+|[^a-z0-9\s﻿]/gu)||[],sym=[];
+  var cap=0,toks=leet.match(/[a-z]+|[0-9]+|[\s﻿]+|[^a-z0-9\s﻿]/gu)||[],sym=[],seen=[];
   for(var t=0;t<toks.length;t++){var tok=toks[t];
     if(/^[\s﻿]+$/.test(tok))continue;
     if(/^[a-z]+$/.test(tok)){
-      if(cvRepeatOrRun(tok))cap+=CV_CB_SEQ;
-      else if(cvWordShaped(tok))cap+=(CV_KW_BLOCK.indexOf(tok)>=0?CV_CB_KNOWN:CV_CB_WORD);
-      else cap+=tok.length*per;}
+      /* 2026-09-08 (Pass 6): pay only for what is NEW against earlier tokens. Twin of the
+         novelty note in cv_kw_cap(); min() never max(), so an affix can only lower a charge. */
+      var novel=tok.length,q;
+      for(q=0;q<seen.length;q++){var nv=tok.length-cvAffix(seen[q],tok);if(nv<novel)novel=nv;}
+      seen.push(tok);
+      var charge;
+      if(cvRepeatOrRun(tok))charge=CV_CB_SEQ;
+      else if(cvWordShaped(tok))charge=(CV_KW_BLOCK.indexOf(tok)>=0?CV_CB_KNOWN:CV_CB_WORD);
+      else charge=tok.length*per;
+      cap+=Math.min(charge,novel*per);}
     else if(/^[0-9]+$/.test(tok))cap+=(cvDigitsCheap(tok)?CV_CB_SEQ:tok.length*per);
     else if(sym.indexOf(tok)<0){sym.push(tok);cap+=per;}}
   if(letters!==''&&CV_KW_BLOCK.indexOf(letters)>=0)cap=Math.min(cap,1200);
@@ -2575,7 +2626,14 @@ elseif ($action === 'invite_cancel') {
   function cvKwHelp(){const h=document.getElementById('kwhelp');if(h)h.style.display=(h.style.display==='none'||!h.style.display)?'flex':'none';}
   function cvSeedHelp(){const h=document.getElementById('seedhelp');if(h)h.style.display=(h.style.display==='none'||!h.style.display)?'flex':'none';}
   function cvSecHelp(){const h=document.getElementById('sechelp');if(h)h.style.display=(h.style.display==='none'||!h.style.display)?'flex':'none';}
-  function cvDice(n){var W=window.CV_WORDS;if(W&&W.length){var r=new Uint32Array(n);crypto.getRandomValues(r);var o=[];for(var i=0;i<n;i++)o.push(W[r[i]%W.length]);return o.join('-');}var c='abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789',r2=new Uint32Array(20);crypto.getRandomValues(r2);return [].map.call(r2,function(x){return c[x%c.length];}).join('');}
+  function cvDice(n){var W=window.CV_WORDS;if(W&&W.length){/* 2026-09-08 (Pass 6): draw WITHOUT replacement. This used to push W[r[i]%W.length] straight
+     in, so a repeated word was possible - and the estimator counts DISTINCT words, so two
+     repeats left 5 distinct and scored 62, under the app's own 65-bit floor. About 1 in 20,000
+     Generate clicks handed the user a keyword the form then refused. Measured, not guessed. */
+    var o=[],guard=0;
+    while(o.length<n&&guard<n*40){var r=new Uint32Array(1);crypto.getRandomValues(r);
+      var w=W[r[0]%W.length];if(o.indexOf(w)<0)o.push(w);guard++;}
+    return o.join('-');}var c='abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789',r2=new Uint32Array(20);crypto.getRandomValues(r2);return [].map.call(r2,function(x){return c[x%c.length];}).join('');}
   function cvGenKeyword(){var kw=cvDice(7);var sy='!@#$%^&*?_+=',rr=new Uint32Array(2);crypto.getRandomValues(rr);kw=kw+'-'+(10+rr[0]%90)+sy[rr[1]%sy.length];var a=document.getElementById('ck'),b=document.getElementById('ck2');if(a){a.type='text';a.value=kw;}if(b){b.type='text';b.value=kw;}var g=document.getElementById('gennote');if(g)g.style.display='block';if(a)a.dispatchEvent(new Event('input'));}
   function cvStart(){cvLeft=CV_DUR;cvClockShow();if(cvT)clearInterval(cvT);cvT=setInterval(()=>{cvLeft--;cvClockShow();if(cvLeft<=0)cvRelock();},1000);}
   // 2026-09-03: re-lock now WIPES the in-memory phrase and empties the grid, rather than

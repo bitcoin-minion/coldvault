@@ -6,6 +6,60 @@ There are no release tags yet, so each entry describes the state of `main` on th
 
 ---
 
+## 2026-09-08 — patterned keywords, and a generator that refused its own output
+
+Closing the two entropy-floor bypasses the previous entry recorded as known limitations, plus a
+generator bug found while measuring the fix.
+
+### Fixed — the entropy gate over-scored mechanically patterned keywords
+
+Every rule in the estimator scored each token **in isolation**, so a family of related tokens was
+charged as if its members were independent. Two shapes therefore cleared the 65-bit floor while
+being trivially enumerable:
+
+| keyword | before | now |
+|---|---|---|
+| `aab-aac-aad-aae-aaf-aag` | 66 — accepted | **48 — refused** |
+| `zzz zzz1 zzz2 zzz3 zzz4 zzz5` | 84 — accepted | **38 — refused** |
+| `baa-caa-daa-eaa-faa-gaa` | 66 — accepted | **48 — refused** |
+| `1zzz 2zzz 3zzz 4zzz 5zzz` | 77 — accepted | **37 — refused** |
+| `123456-123456-123456` | 76 — accepted | **56 — refused** |
+
+A letter token is now charged `min(its own cost, novel characters x per-character rate)`, where the
+novel part is its length minus the longest prefix **or suffix** it shares with any earlier token. So
+`aac` after `aab` costs one character rather than a whole word.
+
+`min()` and never `max()` is the load-bearing detail: sharing an affix can only **lower** a charge.
+That is what leaves real keywords alone — a six-letter word sharing a three-letter suffix still has
+three novel characters, which costs more than a word does, so it stays at the word price. Measured
+before shipping: across a 423-candidate corpus every change was downward and **nothing became newly
+acceptable**; across 20,000 simulated generator outputs there was **no** additional failure.
+
+**Known and deliberate: this catches MECHANICAL families, not SEMANTIC ones.**
+`one-two-three-four-five-six` and `red-orange-yellow-green-blue-indigo` still score 66 and are still
+accepted, because they are six genuinely distinct words with no shared affix — and six distinct word
+tokens floor the base estimate at 66. Separating a real six-word passphrase from a named category
+needs category dictionaries, which is an unbounded data problem rather than arithmetic. Both are
+pinned in `tools/kwcheck.php --selftest` as residuals so they cannot drift unnoticed.
+
+### Fixed — Generate could hand you a keyword the app then refused
+
+`cvDice()` drew words **with replacement**, and the estimator counts DISTINCT words. Two repeats in
+a seven-word draw left five distinct words and scored 62 bits — under the app's own 65-bit floor. So
+roughly **1 in 20,000 clicks of "Generate strong keyword" produced a keyword the form rejected**,
+which is a confusing failure at exactly the wrong moment and it undermines the button the app steers
+people toward. Found by simulation while measuring the change above, not by report. Draws are now
+without replacement; over the same 20,000 outputs the minimum went from 62 bits with one failure to
+**84 bits with none**.
+
+### Verification
+
+All four copies of the estimator — server PHP, the browser twin, and `tools/kwcheck.php` — agree on
+all 423 corpus candidates with **0 disagreements**, and the pinned self-test vectors were
+regenerated as a whole array rather than patched.
+
+---
+
 ## 2026-09-08 — second independent security review
 
 A second review, run against the previous day's commit by reviewers with no knowledge of the first

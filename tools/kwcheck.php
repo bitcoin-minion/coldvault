@@ -173,6 +173,17 @@ function cv_is_repeat_or_run($tok) {
     return strpos($az, $tok) !== false || strpos(strrev($az), $tok) !== false;   // bcd, fed
 }
 
+/** 2026-09-08 (Pass 6): the longest run of characters two tokens share at the START or at the
+ *  END. Used to charge a token only for its novel part - see the note in cv_kw_cap(). Plain
+ *  byte comparison on ASCII lowercase, which is all cv_leet() can produce here, so PHP and the
+ *  JS twin agree by construction. ⚠️ Must stay identical to cvAffix() in the browser copy. */
+function cv_affix($a, $b) {
+    $n = min(strlen($a), strlen($b));
+    $i = 0; while ($i < $n && $a[$i] === $b[$i]) $i++;
+    $j = 0; while ($j < $n && $a[strlen($a)-1-$j] === $b[strlen($b)-1-$j]) $j++;
+    return $i > $j ? $i : $j;
+}
+
 function cv_is_word_shaped($run) {
     $n = strlen($run);
     if ($n < 3) return false;
@@ -239,10 +250,36 @@ function cv_kw_cap($v) {
     //   earned ~6 bits each. U+FEFF was a second, separate case - JavaScript's \s matches it and
     //   PCRE's does not. ⚠️ Keep this class identical to the app's PHP and its JS twin.
     preg_match_all('/[a-z]+|[0-9]+|[\s\x{FEFF}]+|[^a-z0-9\s\x{FEFF}]/u', $leet, $m);
-    $symSeen = [];
+    $symSeen = []; $capSeen = [];
     foreach ($m[0] as $tok) {
         if (preg_match('/^[\s\x{FEFF}]+$/u', $tok)) continue;             // separators are free
         if (preg_match('/^[a-z]+$/', $tok)) {
+            /* 2026-09-08 (Pass 6): charge a token only for what is NEW relative to the tokens
+               before it. Every rule above scores each token in ISOLATION, so a family of related
+               tokens was charged as if the members were independent - which is what let two shapes
+               clear the 65-bit floor while being trivially enumerable:
+                 "aab-aac-aad-aae-aaf-aag"      measured 66 (6 "words" x 11 bits)
+                 "zzz zzz1 zzz2 zzz3 zzz4 zzz5" measured 84
+               Both are one stem plus a counter, worth nowhere near that. The novel part of a token
+               is its length minus the longest prefix OR suffix it shares with any earlier token, so
+               "aac" after "aab" costs one character rather than a whole word.
+               ⚠️ min(), never max(): sharing an affix can only LOWER a charge. That is what keeps
+               real keywords untouched - a six-letter word sharing a three-letter suffix still has
+               three novel characters, which costs MORE than a word, so it stays at the word price.
+               Measured before shipping: across 423 candidates every change was downward and NOTHING
+               became newly acceptable; across 20,000 simulated Generate outputs there was no
+               additional failure. Re-measure both if you touch this.
+               Known and deliberate: this catches MECHANICAL families - shared affixes, counters,
+               repeats. It does NOT catch SEMANTIC ones, so "one-two-three-four-five-six" and
+               "red-orange-yellow-green-blue-indigo" still score 66 and are still accepted. Six
+               distinct word tokens floor the base estimate at 66, and separating a real six-word
+               passphrase from a named category needs category dictionaries, not arithmetic. */
+            $novel = strlen($tok);
+            foreach ($capSeen as $prev) {
+                $shared = cv_affix($prev, $tok);
+                if (strlen($tok) - $shared < $novel) $novel = strlen($tok) - $shared;
+            }
+            $capSeen[] = $tok;
             // 2026-09-08 (second independent review): a letter run that is ONE character repeated
             //   ("aaa", "zzz") or a straight alphabet run ("bcd") is not a word, whatever its vowel
             //   ratio - it costs an attacker ~5 bits, not the ~13 a word costs. Without this the
@@ -252,10 +289,11 @@ function cv_kw_cap($v) {
             // ⚠️ Deliberately narrow: a token with 2+ distinct, non-consecutive letters ("ebb")
             //   still earns full word credit, because the app's own 7-word generator emits exactly
             //   that shape and a broader rule would push generated keywords under their own floor.
-            if (cv_is_repeat_or_run($tok))                  $cap += CV_CB_SEQ;
+            if (cv_is_repeat_or_run($tok))                  $charge = CV_CB_SEQ;
             elseif (cv_is_word_shaped($tok))
-                $cap += in_array($tok, CV_KW_BLOCK, true) ? CV_CB_KNOWN : CV_CB_WORD;
-            else                                            $cap += strlen($tok) * $per;
+                $charge = in_array($tok, CV_KW_BLOCK, true) ? CV_CB_KNOWN : CV_CB_WORD;
+            else                                            $charge = strlen($tok) * $per;
+            $cap += min($charge, $novel * $per);            // see the novelty note above
         } elseif (preg_match('/^[0-9]+$/', $tok)) {
             $cap += cv_digits_cheap($tok) ? CV_CB_SEQ : strlen($tok) * $per;
         } else {
@@ -619,25 +657,25 @@ function selftest() {
     // 2026-09-08: and a word-shaped run is charged what a word costs, so leetspeak, known
     //   passwords, keyboard walks and year suffixes no longer clear the floor.
     $edge = [
-        ['bus-hip-guard-net-retire-express',   66, true  ],   // 6 words, just over
-        ['correct-horse-battery-staple',       44, false ],   // 4 words from a 2048 list really IS 44 bits
-        ['Fluffy2019',                         37, false ],   // one word + a year
-        ['xK7$mQ9!zR2#pL4',                    92, true  ],   // random string - must NOT be discounted
-        ['aaa-aaa-aaa-aaa-aaa-aaa',            11, false ],   // repetition buys nothing
-        ['aaaaaaaaaaaaaaaaaaaaaaaa',            7, false ],   //   " (2026-09-08: 9 -> 7, now charged as a run)
-        ['ab-ab-ab-ab-ab-ab-ab-ab-ab-ab',      12, false ],   //   "
-        // 2026-09-08 (second independent review): the repeat/run rule. Both of these measured 66
-        //   and CLEARED the floor before it, because the structural cap sat above the base estimate
-        //   and never bound. Pinned here so that can never silently come back.
-        ['aaa-bbb-ccc-ddd-eee-fff',            48, false ],
-        ['bcd-cde-def-efg-fgh-ghi',            48, false ],
-        // ...and the two shapes that still get through, pinned so the gap is documented rather than
-        //   forgotten. Closing these needs dictionary/pattern analysis, not a ceiling.
-        ['aab-aac-aad-aae-aaf-aag',            66, true  ],   // shared prefix
-        ['zzz zzz1 zzz2 zzz3 zzz4 zzz5',       84, true  ],   // stem plus counter
-        ['MyPassword2026',                     37, false ],   // 2026-09-08: word + year, was 83
-        ['Summer2026!Winter',                  47, false ],   // 2026-09-08: two words + year, was 112
-        ['seedphrasebackup',                   13, false ],   // 2026-09-08: run-together words, was 75
+        ['bus-hip-guard-net-retire-express',    66, true  ],   // 6 words, just over
+        ['correct-horse-battery-staple',        44, false ],   // 4 words from a 2048 list really IS 44 bits
+        ['Fluffy2019',                          37, false ],   // one word + a year
+        ['xK7$mQ9!zR2#pL4',                     92, true  ],   // random string - must NOT be discounted
+        ['aaa-aaa-aaa-aaa-aaa-aaa',             11, false ],   // repetition buys nothing
+        ['aaaaaaaaaaaaaaaaaaaaaaaa',             7, false ],   //   "
+        ['ab-ab-ab-ab-ab-ab-ab-ab-ab-ab',       12, false ],   //   "
+        ['aaa-bbb-ccc-ddd-eee-fff',             48, false ],   // 2026-09-08: repeat/run tokens are not words
+        ['bcd-cde-def-efg-fgh-ghi',             48, false ],   //   "
+        ['aab-aac-aad-aae-aaf-aag',             48, false ],   // 2026-09-08 Pass 6: shared PREFIX family, was 66/accept
+        ['baa-caa-daa-eaa-faa-gaa',             48, false ],   // 2026-09-08 Pass 6: shared SUFFIX family, was 66/accept
+        ['zzz zzz1 zzz2 zzz3 zzz4 zzz5',        38, false ],   // 2026-09-08 Pass 6: stem + counter, was 84/accept
+        ['1zzz 2zzz 3zzz 4zzz 5zzz',            37, false ],   // 2026-09-08 Pass 6: counter + stem, was 77/accept
+        ['123456-123456-123456',                56, false ],   // 2026-09-08 Pass 6: repeated block, was 76/accept
+        ['MyPassword2026',                      37, false ],   // word + year
+        ['Summer2026!Winter',                   47, false ],   // two words + year
+        ['seedphrasebackup',                    13, false ],   // run-together words
+        ['one-two-three-four-five-six',         66, true  ],   // KNOWN RESIDUAL: semantic family, still accepted
+        ['red-orange-yellow-green-blue-indigo',  66, true  ],   // KNOWN RESIDUAL: semantic family, still accepted
     ];
     foreach ($edge as $e) {
         $b  = cv_entropy($e[0]);
