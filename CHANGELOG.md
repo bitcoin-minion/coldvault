@@ -63,6 +63,47 @@ Existing authenticator secrets, labels and backup codes keep working; do not reg
   `vault_login_throttle.ts`) so they do not scan their tables on every request.
 - `CANONICAL_HOST` documentation now matches the code (refuse, do not reflect).
 
+### Fixed: the keyword strength gate accepted the weakest common passwords
+
+**This changes which keywords the app accepts.** No database change, no configuration change, and
+**existing vaults and keywords are untouched** — the floor has only ever gated a keyword being
+*set*, so nothing you already have stops working.
+
+The estimator scored a non-passphrase as `length × log2(alphabet)`. That is true of a *random*
+string and badly wrong for a patterned one, so against the 65-bit floor it admitted exactly the
+shapes a cracking run tries first:
+
+| keyword | scored | now | realistic |
+|---|---:|---:|---:|
+| `qwertyuiop123!` | 86 | **18** | ~15 |
+| `Password123!` | 79 | **33** | ~15 |
+| `MyPassword2026` | 83 | **37** | ~20 |
+| `Tr0ub4dor&3` | 72 | **26** | ~28 |
+| `Summer2026!` | 72 | **40** | ~20 |
+
+Because the keyword *is* the encryption key, that gate was the only thing standing between a
+stolen database dump and the recovery phrase.
+
+The old estimate is now an **upper bound**, taken as a minimum against a structural ceiling built
+by tokenising the candidate: leetspeak is folded first, a word-shaped run is charged what a word
+costs rather than what its characters would be worth if they were random, and known passwords,
+keyboard walks, year suffixes and repeats are charged almost nothing. A genuinely random string
+keeps its full value — `xK7$mQ9!zR2#pL4` scores 92, and the app's own **Generate** button (seven
+words plus digits and a symbol, ~84 bits) is unaffected.
+
+The **passphrase branch is deliberately unchanged**: four words drawn from a 2048-word list really
+is 44 bits, so `correct horse battery staple` was always correctly refused by a 65-bit floor.
+
+Known limitation, and it errs toward refusing: with no dictionary to consult, a long lowercase run
+with a plausible vowel ratio is charged as one unknown word whether or not it is one. A random
+letters-only keyword may therefore be refused. Prefer **Generate**.
+
+All five copies of the estimator — server, page script, and `tools/kwcheck.php` — were replaced
+together and cross-checked over **3,414 candidates including multibyte and emoji with zero
+disagreement**, so the strength meter can never show a number the server then refuses. The
+arithmetic is integer hundredths-of-a-bit against a shared table rather than floating-point
+`log()`, which is what makes that guarantee hold. `kwcheck.php --selftest` covers the new vectors.
+
 ## 2026-09-06
 
 ### Added

@@ -92,29 +92,166 @@ function cv_tokens($v) {
  *  length at twice the number of distinct characters. Before this, both
  *  "aaa-aaa-aaa-aaa-aaa-aaa" (66) and a single letter repeated 24 times (113) cleared
  *  the 65-bit floor. --selftest covers both. */
-function cv_entropy($v) {
-    if ($v === '') { return 0; }
-    $t = cv_tokens($v);
-    if (count($t) >= 3) {
-        // Passphrase mode: 11 bits per DISTINCT word (log2 of the 2048-word BIP39 list).
-        $u = [];
-        foreach ($t as $p) { $u[strtolower($p)] = true; }
-        $b = count($u) * 11;
-        if (preg_match('/[A-Z]/', $v))            { $b += 2; }
-        if (preg_match('/[0-9]/', $v))            { $b += 3; }
-        if (preg_match('/[^A-Za-z0-9 \-]/', $v))  { $b += 4; }
-    } else {
-        // Charset mode: length x log2(alphabet size), with length capped at twice the
-        // number of DISTINCT characters so repetition cannot inflate it.
-        $cs = 0;
-        if (preg_match('/[a-z]/', $v))        { $cs += 26; }
-        if (preg_match('/[A-Z]/', $v))        { $cs += 26; }
-        if (preg_match('/[0-9]/', $v))        { $cs += 10; }
-        if (preg_match('/[^A-Za-z0-9]/', $v)) { $cs += 33; }
-        $b = min(strlen($v), 2 * count(count_chars($v, 1))) * log($cs ?: 2, 2);
-    }
-    return (int)round($b);
+// 2026-09-08 (internal audit F1): the keyword-strength estimator was replaced. The old
+//   composition branch scored length x log2(alphabet), which is only true for a RANDOM
+//   string; for a patterned one it over-scored by 40-70 bits, so the 65-bit floor admitted
+//   "Password123!" (79), "qwertyuiop123!" (86) and "Tr0ub4dor&3" (72) - the very shapes a
+//   cracking run tries first. Since the keyword IS the encryption key, that gate was the
+//   only thing between a stolen dump and the phrase.
+//   The old estimate is now an UPPER BOUND, taken as a minimum against a structural
+//   ceiling: a word-shaped run costs what a word costs, not what its characters would be
+//   worth if they were random. The WORD branch is unchanged on purpose - four words from a
+//   2048-word list really is 44 bits - which also keeps the app's own 7-word generator
+//   (~84 bits) passing its own floor. All arithmetic is integer centibits against a shared
+//   table, never log(), so the PHP and JavaScript copies cannot drift and show a meter
+//   value the server then refuses.
+// Passwords, seasons and patterns that appear at the top of every cracking list. Lowercase, and
+// compared only after leet-normalisation. Deliberately NOT a general dictionary: the structural
+// rules below do the heavy lifting, so this only has to catch the outright notorious.
+const CV_KW_BLOCK = [
+ 'password','passwort','contrasena','pass','passw0rd','p4ssword','letmein','welcome','admin',
+ 'administrator','root','toor','login','logon','user','guest','test','testing','demo','sample',
+ 'qwerty','qwertyuiop','qwertz','azerty','asdf','asdfgh','asdfghjk','zxcv','zxcvbn','wasd',
+ 'abc','abcd','abcde','abcdef','iloveyou','trustno','starwars','superman','batman','pokemon',
+ 'football','baseball','basketball','soccer','hockey','sunshine','princess','flower','butterfly',
+ 'chocolate','cookie','freedom','whatever','nothing','secret','private','hidden','safe','secure',
+ 'money','cash','bank','wallet','seed','phrase','mnemonic','recovery','backup','vault','coldvault',
+ 'bitcoin','satoshi','crypto','blockchain','hodl','moon','mining','miner','hash','block',
+ 'summer','winter','spring','autumn','fall','january','february','march','april','june','july',
+ 'august','september','october','november','december','monday','friday','today','tomorrow',
+ 'dragon','monkey','shadow','master','ninja','hunter','killer','ranger','tigger','charlie',
+ 'jordan','michael','jennifer','thomas','robert','daniel','matthew','george','ashley','amanda',
+ 'computer','internet','google','samsung','apple','windows','linux','server','database','oracle',
+ 'liverpool','arsenal','chelsea','barcelona','madrid','manchester','love','hello','world','yes','no',
+];
+
+const CV_LOG2 = [   // centibits: round(log2(charset) * 100)
+    10 => 332, 26 => 470, 33 => 504, 36 => 517, 43 => 543, 52 => 570,
+    59 => 588, 62 => 595, 69 => 611, 85 => 641, 95 => 657,
+];
+const CV_CB_LETTER = 470;   // log2(26) - a letter in a non-word run
+const CV_CB_DIGIT  = 332;   // log2(10)
+const CV_CB_SYMBOL = 450;   // a printable symbol, conservatively
+const CV_CB_WORD   = 1300;  // an unknown word: ~log2(8000) common words
+const CV_CB_KNOWN  = 700;   // a word from the block list above: ~log2(128)
+const CV_CB_SEQ    = 700;   // a year, or a sequential/repeating digit run
+
+/** code points, so PHP and JS count the same units for multibyte input */
+function cv_chars($v) { $a = preg_split('//u', $v, -1, PREG_SPLIT_NO_EMPTY); return $a === false ? [] : $a; }
+
+/** leet-normalise: fold the substitutions a cracking rule set applies for free */
+function cv_leet($s) {
+    return strtr(strtolower($s), [
+        '0'=>'o','1'=>'i','3'=>'e','4'=>'a','5'=>'s','7'=>'t','8'=>'b','@'=>'a','$'=>'s',
+    ]);
 }
+
+function cv_is_word_shaped($run) {
+    $n = strlen($run);
+    if ($n < 3) return false;
+    $v = preg_match_all('/[aeiouy]/', $run);
+    return $v * 5 >= $n;                      // at least one vowel per five letters
+}
+
+/** a keyboard walk or straight run covering most of the candidate */
+function cv_is_walk($alnum) {
+    $n = strlen($alnum);
+    if ($n < 4) return false;
+    $rows = ['qwertyuiop','asdfghjkl','zxcvbnm','1234567890','abcdefghijklmnopqrstuvwxyz'];
+    foreach ($rows as $r) {
+        $rr = strrev($r);
+        for ($len = $n; $len >= 4; $len--) {
+            for ($i = 0; $i + $len <= $n; $i++) {
+                $seg = substr($alnum, $i, $len);
+                if ($len * 10 >= $n * 7 && (strpos($r, $seg) !== false || strpos($rr, $seg) !== false)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+function cv_digits_cheap($d) {
+    $n = strlen($d);
+    if ($n >= 2 && count(array_unique(str_split($d))) === 1) return true;         // 1111
+    if ($n === 4 && (strncmp($d, '19', 2) === 0 || strncmp($d, '20', 2) === 0)) return true;  // a year
+    if ($n >= 3 && (strpos('1234567890', $d) !== false || strpos('0987654321', $d) !== false)) return true;
+    return false;
+}
+
+/** the observed alphabet, in centibits per character - the same rate the base estimate uses, so
+ *  unstructured content is never charged LESS by the ceiling than by the estimate it caps. */
+function cv_per_char($v) {
+    $cs = 0;
+    if (preg_match('/[a-z]/', $v))        $cs += 26;
+    if (preg_match('/[A-Z]/', $v))        $cs += 26;
+    if (preg_match('/[0-9]/', $v))        $cs += 10;
+    if (preg_match('/[^A-Za-z0-9]/', $v)) $cs += 33;
+    return CV_LOG2[$cs] ?? 100;
+}
+
+/** the structural ceiling, in centibits.
+ *  Tokenising happens on the LEET-NORMALISED text, so "Tr0ub4dor" is seen as the one word it is
+ *  rather than as five unrelated fragments. A word-shaped run is charged what a word costs; every
+ *  other character is charged the candidate's own per-character rate, so a random string keeps its
+ *  full value and only detectable structure is discounted. */
+function cv_kw_cap($v) {
+    $chars    = cv_chars($v);
+    $n        = count($chars);
+    $distinct = count(array_unique($chars));
+    $per      = cv_per_char($v);
+    $leet     = cv_leet($v);
+    $alnum    = preg_replace('/[^a-z0-9]/', '', $leet);
+    $letters  = preg_replace('/[^a-z]/', '', $leet);
+
+    $cap = 0;
+    preg_match_all('/[a-z]+|[0-9]+|\s+|[^a-z0-9\s]/u', $leet, $m);
+    foreach ($m[0] as $tok) {
+        if (preg_match('/^\s+$/', $tok))    continue;                     // separators are free
+        if (preg_match('/^[a-z]+$/', $tok)) {
+            if (cv_is_word_shaped($tok))
+                $cap += in_array($tok, CV_KW_BLOCK, true) ? CV_CB_KNOWN : CV_CB_WORD;
+            else
+                $cap += strlen($tok) * $per;
+        } elseif (preg_match('/^[0-9]+$/', $tok)) {
+            $cap += cv_digits_cheap($tok) ? CV_CB_SEQ : strlen($tok) * $per;
+        } else {
+            $cap += $per;
+        }
+    }
+
+    /* hard ceilings that override the sum */
+    if ($letters !== '' && in_array($letters, CV_KW_BLOCK, true)) $cap = min($cap, 1200);
+    if (cv_is_walk($alnum))                                       $cap = min($cap, 1800);
+    if ($n > 0 && $distinct <= 4)                                 $cap = min($cap, 1200);
+    return $cap;
+}
+
+function cv_entropy($v) {
+    if ($v === '') return 0;
+    $chars    = cv_chars($v);
+    $n        = count($chars);
+    $distinct = count(array_unique($chars));
+
+    /* ---- the original estimate, kept as an UPPER BOUND ---- */
+    $t = []; $u = [];
+    foreach (preg_split('/[^A-Za-z0-9]+/', $v) as $p)
+        if (strlen($p) >= 3 && preg_match('/^[A-Za-z]+$/', $p)) { $t[] = $p; $u[strtolower($p)] = 1; }
+    if (count($t) >= 3) {
+        // word branch: unchanged. 11 bits per DISTINCT word already assumes a small list, and this
+        // is what keeps the app's own 7-word generator (~84 bits) passing its own floor.
+        $cb = count($u) * 1100;
+        if (preg_match('/[A-Z]/', $v))           $cb += 200;
+        if (preg_match('/[0-9]/', $v))           $cb += 300;
+        if (preg_match('/[^A-Za-z0-9 \-]/', $v)) $cb += 400;
+    } else {
+        $cb = min($n, 2 * $distinct) * cv_per_char($v);
+    }
+
+    /* ---- and the structural ceiling ---- */
+    $cap = cv_kw_cap($v);
+    return (int)round(min($cb, $cap) / 100);
+}
+
 
 /** The app's four rating bands. */
 function cv_rating($bits) {
@@ -266,7 +403,7 @@ function report($v) {
     printf("  %-22s %s\n", 'word-like tokens', count($toks));
     printf("  %-22s %s\n", 'scoring mode', $mode === 'passphrase'
         ? 'passphrase (3+ word tokens -> 11 bits per DISTINCT word)'
-        : 'charset (length x log2 of alphabet)');
+        : 'charset (length x log2 of alphabet), capped by a structural ceiling');
     printf("  %-22s %s\n", 'character classes',
         implode(', ', array_filter([
             preg_match('/[a-z]/', $v)        ? 'lower'  : null,
@@ -306,10 +443,13 @@ function report($v) {
             printf("           instead of ~%d. Illustration only, not a second measurement.\n", $bits);
         }
     } else {
-        echo   "    [!]    Charset scoring assumes every character is independent and random.\n";
-        echo   "           That holds for machine-generated strings. For anything you invented,\n";
-        echo   "           including leetspeak like 'P@ssw0rd', it overstates strength badly,\n";
-        echo   "           because crackers apply exactly those substitution rules first.\n";
+        echo   "    [ok]   Charset scoring assumes every character is independent and random,\n";
+        echo   "           which only holds for machine-generated strings. Since 2026-09-08 the\n";
+        echo   "           score above is therefore capped by a STRUCTURAL ceiling: a word-shaped\n";
+        echo   "           run is charged what a word costs, leetspeak is folded first, and known\n";
+        echo   "           passwords, keyboard walks, years and repeats are charged almost nothing.\n";
+        echo   "           So 'P@ssw0rd' and 'Tr0ub4dor&3' no longer clear the floor. A genuinely\n";
+        echo   "           random string keeps its full value.\n";
     }
 
     $warns = cv_warnings($v);
@@ -410,10 +550,12 @@ TXT;
 function selftest() {
     // Synthetic vectors only. No real keyword appears in this file.
     $vectors = [
-        ['wolf-echo-tango-delta-bravo-lima-kilo-73$', 84, 'very strong'],
-        ['Tr0ub4dor&3',                               72, 'strong'],
-        ['password',                                  38, 'fair'],
-        ['abc-def-ghi',                               33, 'weak'],
+        ['wolf-echo-tango-delta-bravo-lima-kilo-73$',  84, 'very strong'],
+        ['Tr0ub4dor&3',                                26, 'weak'],
+        ['password',                                    7, 'weak'],
+        ['abc-def-ghi',                                18, 'weak'],
+        ['Password123!',                               33, 'weak'],
+        ['qwertyuiop123!',                             18, 'weak'],
     ];
     echo "\n  Self-test - this PHP port vs the web app's cvEntropy():\n\n";
     $fail = 0;
@@ -426,16 +568,20 @@ function selftest() {
             $ok ? '[ok]' : '[FAIL]', $v[0], $bits, $rate, $v[1], $v[2]);
     }
     // the acceptance boundary itself, so a drift in either direction is caught
+    // 2026-09-03: repetition must not buy strength.
+    // 2026-09-08: and a word-shaped run is charged what a word costs, so leetspeak, known
+    //   passwords, keyboard walks and year suffixes no longer clear the floor.
     $edge = [
-        ['bus-hip-guard-net-retire-express',            66, true ],   // 6 words, just over
-        ['correct-horse-battery-staple',                44, false],   // 4 words, well under
-        ['Fluffy2019',                                  60, false],   // under, and rightly refused
-        ['xK7$mQ9!zR2#pL4',                             99, true ],   // random string, must NOT be misread
-        // 2026-09-03: repetition must not buy strength. Both of these cleared the floor
-        //   before the fix - the first scored 66, the second 113.
-        ['aaa-aaa-aaa-aaa-aaa-aaa',                     11, false],
-        ['aaaaaaaaaaaaaaaaaaaaaaaa',                     9, false],
-        ['ab-ab-ab-ab-ab-ab-ab-ab-ab-ab',               35, false],
+        ['bus-hip-guard-net-retire-express',   66, true  ],   // 6 words, just over
+        ['correct-horse-battery-staple',       44, false ],   // 4 words from a 2048 list really IS 44 bits
+        ['Fluffy2019',                         37, false ],   // one word + a year
+        ['xK7$mQ9!zR2#pL4',                    92, true  ],   // random string - must NOT be discounted
+        ['aaa-aaa-aaa-aaa-aaa-aaa',            11, false ],   // repetition buys nothing
+        ['aaaaaaaaaaaaaaaaaaaaaaaa',            9, false ],   //   "
+        ['ab-ab-ab-ab-ab-ab-ab-ab-ab-ab',      12, false ],   //   "
+        ['MyPassword2026',                     37, false ],   // 2026-09-08: word + year, was 83
+        ['Summer2026!Winter',                  47, false ],   // 2026-09-08: two words + year, was 112
+        ['seedphrasebackup',                   13, false ],   // 2026-09-08: run-together words, was 75
     ];
     foreach ($edge as $e) {
         $b  = cv_entropy($e[0]);

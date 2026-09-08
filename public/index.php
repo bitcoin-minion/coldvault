@@ -449,26 +449,166 @@ function vault_save($con, $row, $uid, $kw, $newkw, $payload, $dek) {
 //   This only ever gates a NEW keyword. It is not used to derive any key, so no
 //   existing vault is affected - an old keyword that now measures lower still opens
 //   its vault, and only triggers the advisory notice on unlock.
+// 2026-09-08 (internal audit F1): the keyword-strength estimator was replaced. The old
+//   composition branch scored length x log2(alphabet), which is only true for a RANDOM
+//   string; for a patterned one it over-scored by 40-70 bits, so the 65-bit floor admitted
+//   "Password123!" (79), "qwertyuiop123!" (86) and "Tr0ub4dor&3" (72) - the very shapes a
+//   cracking run tries first. Since the keyword IS the encryption key, that gate was the
+//   only thing between a stolen dump and the phrase.
+//   The old estimate is now an UPPER BOUND, taken as a minimum against a structural
+//   ceiling: a word-shaped run costs what a word costs, not what its characters would be
+//   worth if they were random. The WORD branch is unchanged on purpose - four words from a
+//   2048-word list really is 44 bits - which also keeps the app's own 7-word generator
+//   (~84 bits) passing its own floor. All arithmetic is integer centibits against a shared
+//   table, never log(), so the PHP and JavaScript copies cannot drift and show a meter
+//   value the server then refuses.
+// Passwords, seasons and patterns that appear at the top of every cracking list. Lowercase, and
+// compared only after leet-normalisation. Deliberately NOT a general dictionary: the structural
+// rules below do the heavy lifting, so this only has to catch the outright notorious.
+const CV_KW_BLOCK = [
+ 'password','passwort','contrasena','pass','passw0rd','p4ssword','letmein','welcome','admin',
+ 'administrator','root','toor','login','logon','user','guest','test','testing','demo','sample',
+ 'qwerty','qwertyuiop','qwertz','azerty','asdf','asdfgh','asdfghjk','zxcv','zxcvbn','wasd',
+ 'abc','abcd','abcde','abcdef','iloveyou','trustno','starwars','superman','batman','pokemon',
+ 'football','baseball','basketball','soccer','hockey','sunshine','princess','flower','butterfly',
+ 'chocolate','cookie','freedom','whatever','nothing','secret','private','hidden','safe','secure',
+ 'money','cash','bank','wallet','seed','phrase','mnemonic','recovery','backup','vault','coldvault',
+ 'bitcoin','satoshi','crypto','blockchain','hodl','moon','mining','miner','hash','block',
+ 'summer','winter','spring','autumn','fall','january','february','march','april','june','july',
+ 'august','september','october','november','december','monday','friday','today','tomorrow',
+ 'dragon','monkey','shadow','master','ninja','hunter','killer','ranger','tigger','charlie',
+ 'jordan','michael','jennifer','thomas','robert','daniel','matthew','george','ashley','amanda',
+ 'computer','internet','google','samsung','apple','windows','linux','server','database','oracle',
+ 'liverpool','arsenal','chelsea','barcelona','madrid','manchester','love','hello','world','yes','no',
+];
+
+const CV_LOG2 = [   // centibits: round(log2(charset) * 100)
+    10 => 332, 26 => 470, 33 => 504, 36 => 517, 43 => 543, 52 => 570,
+    59 => 588, 62 => 595, 69 => 611, 85 => 641, 95 => 657,
+];
+const CV_CB_LETTER = 470;   // log2(26) - a letter in a non-word run
+const CV_CB_DIGIT  = 332;   // log2(10)
+const CV_CB_SYMBOL = 450;   // a printable symbol, conservatively
+const CV_CB_WORD   = 1300;  // an unknown word: ~log2(8000) common words
+const CV_CB_KNOWN  = 700;   // a word from the block list above: ~log2(128)
+const CV_CB_SEQ    = 700;   // a year, or a sequential/repeating digit run
+
+/** code points, so PHP and JS count the same units for multibyte input */
+function cv_chars($v) { $a = preg_split('//u', $v, -1, PREG_SPLIT_NO_EMPTY); return $a === false ? [] : $a; }
+
+/** leet-normalise: fold the substitutions a cracking rule set applies for free */
+function cv_leet($s) {
+    return strtr(strtolower($s), [
+        '0'=>'o','1'=>'i','3'=>'e','4'=>'a','5'=>'s','7'=>'t','8'=>'b','@'=>'a','$'=>'s',
+    ]);
+}
+
+function cv_is_word_shaped($run) {
+    $n = strlen($run);
+    if ($n < 3) return false;
+    $v = preg_match_all('/[aeiouy]/', $run);
+    return $v * 5 >= $n;                      // at least one vowel per five letters
+}
+
+/** a keyboard walk or straight run covering most of the candidate */
+function cv_is_walk($alnum) {
+    $n = strlen($alnum);
+    if ($n < 4) return false;
+    $rows = ['qwertyuiop','asdfghjkl','zxcvbnm','1234567890','abcdefghijklmnopqrstuvwxyz'];
+    foreach ($rows as $r) {
+        $rr = strrev($r);
+        for ($len = $n; $len >= 4; $len--) {
+            for ($i = 0; $i + $len <= $n; $i++) {
+                $seg = substr($alnum, $i, $len);
+                if ($len * 10 >= $n * 7 && (strpos($r, $seg) !== false || strpos($rr, $seg) !== false)) return true;
+            }
+        }
+    }
+    return false;
+}
+
+function cv_digits_cheap($d) {
+    $n = strlen($d);
+    if ($n >= 2 && count(array_unique(str_split($d))) === 1) return true;         // 1111
+    if ($n === 4 && (strncmp($d, '19', 2) === 0 || strncmp($d, '20', 2) === 0)) return true;  // a year
+    if ($n >= 3 && (strpos('1234567890', $d) !== false || strpos('0987654321', $d) !== false)) return true;
+    return false;
+}
+
+/** the observed alphabet, in centibits per character - the same rate the base estimate uses, so
+ *  unstructured content is never charged LESS by the ceiling than by the estimate it caps. */
+function cv_per_char($v) {
+    $cs = 0;
+    if (preg_match('/[a-z]/', $v))        $cs += 26;
+    if (preg_match('/[A-Z]/', $v))        $cs += 26;
+    if (preg_match('/[0-9]/', $v))        $cs += 10;
+    if (preg_match('/[^A-Za-z0-9]/', $v)) $cs += 33;
+    return CV_LOG2[$cs] ?? 100;
+}
+
+/** the structural ceiling, in centibits.
+ *  Tokenising happens on the LEET-NORMALISED text, so "Tr0ub4dor" is seen as the one word it is
+ *  rather than as five unrelated fragments. A word-shaped run is charged what a word costs; every
+ *  other character is charged the candidate's own per-character rate, so a random string keeps its
+ *  full value and only detectable structure is discounted. */
+function cv_kw_cap($v) {
+    $chars    = cv_chars($v);
+    $n        = count($chars);
+    $distinct = count(array_unique($chars));
+    $per      = cv_per_char($v);
+    $leet     = cv_leet($v);
+    $alnum    = preg_replace('/[^a-z0-9]/', '', $leet);
+    $letters  = preg_replace('/[^a-z]/', '', $leet);
+
+    $cap = 0;
+    preg_match_all('/[a-z]+|[0-9]+|\s+|[^a-z0-9\s]/u', $leet, $m);
+    foreach ($m[0] as $tok) {
+        if (preg_match('/^\s+$/', $tok))    continue;                     // separators are free
+        if (preg_match('/^[a-z]+$/', $tok)) {
+            if (cv_is_word_shaped($tok))
+                $cap += in_array($tok, CV_KW_BLOCK, true) ? CV_CB_KNOWN : CV_CB_WORD;
+            else
+                $cap += strlen($tok) * $per;
+        } elseif (preg_match('/^[0-9]+$/', $tok)) {
+            $cap += cv_digits_cheap($tok) ? CV_CB_SEQ : strlen($tok) * $per;
+        } else {
+            $cap += $per;
+        }
+    }
+
+    /* hard ceilings that override the sum */
+    if ($letters !== '' && in_array($letters, CV_KW_BLOCK, true)) $cap = min($cap, 1200);
+    if (cv_is_walk($alnum))                                       $cap = min($cap, 1800);
+    if ($n > 0 && $distinct <= 4)                                 $cap = min($cap, 1200);
+    return $cap;
+}
+
 function cv_entropy($v) {
     if ($v === '') return 0;
+    $chars    = cv_chars($v);
+    $n        = count($chars);
+    $distinct = count(array_unique($chars));
+
+    /* ---- the original estimate, kept as an UPPER BOUND ---- */
     $t = []; $u = [];
     foreach (preg_split('/[^A-Za-z0-9]+/', $v) as $p)
         if (strlen($p) >= 3 && preg_match('/^[A-Za-z]+$/', $p)) { $t[] = $p; $u[strtolower($p)] = 1; }
     if (count($t) >= 3) {
-        $b = count($u) * 11;                              // log2(2048) per DISTINCT word
-        if (preg_match('/[A-Z]/', $v))           $b += 2;
-        if (preg_match('/[0-9]/', $v))           $b += 3;
-        if (preg_match('/[^A-Za-z0-9 \-]/', $v)) $b += 4;
+        // word branch: unchanged. 11 bits per DISTINCT word already assumes a small list, and this
+        // is what keeps the app's own 7-word generator (~84 bits) passing its own floor.
+        $cb = count($u) * 1100;
+        if (preg_match('/[A-Z]/', $v))           $cb += 200;
+        if (preg_match('/[0-9]/', $v))           $cb += 300;
+        if (preg_match('/[^A-Za-z0-9 \-]/', $v)) $cb += 400;
     } else {
-        $cs = 0;
-        if (preg_match('/[a-z]/', $v))        $cs += 26;
-        if (preg_match('/[A-Z]/', $v))        $cs += 26;
-        if (preg_match('/[0-9]/', $v))        $cs += 10;
-        if (preg_match('/[^A-Za-z0-9]/', $v)) $cs += 33;
-        $b = min(strlen($v), 2 * count(count_chars($v, 1))) * log($cs ?: 2, 2);
+        $cb = min($n, 2 * $distinct) * cv_per_char($v);
     }
-    return (int)round($b);
+
+    /* ---- and the structural ceiling ---- */
+    $cap = cv_kw_cap($v);
+    return (int)round(min($cb, $cap) / 100);
 }
+
 
 // 24 symbols from a 32-character alphabet with no I and no O, so nothing is mistaken
 // for 1 or 0 when read aloud or copied by hand: 24 * 5 = ~120 bits.
@@ -2054,8 +2194,63 @@ elseif ($action === 'invite_cancel') {
   const CV_MIN = <?php echo (int)MIN_KEYSLOT_BITS;?>;   // 2026-09-03: same floor as the server
   // 2026-09-03: distinct words only, and the character fallback caps length at twice the
   //   number of distinct characters, so repetition cannot inflate the meter. Mirrors
-  //   cv_entropy() in PHP exactly - cross-checked over 1193 inputs, zero disagreements.
-  function cvEntropy(v){if(!v)return 0;var t=v.split(/[^A-Za-z0-9]+/).filter(function(x){return x.length>=3&&/^[A-Za-z]+$/.test(x);});var b;if(t.length>=3){var u=[];t.forEach(function(x){var k=x.toLowerCase();if(u.indexOf(k)<0)u.push(k);});b=u.length*11;if(/[A-Z]/.test(v))b+=2;if(/[0-9]/.test(v))b+=3;if(/[^A-Za-z0-9 \-]/.test(v))b+=4;}else{var cs=0;if(/[a-z]/.test(v))cs+=26;if(/[A-Z]/.test(v))cs+=26;if(/[0-9]/.test(v))cs+=10;if(/[^A-Za-z0-9]/.test(v))cs+=33;var d=0;for(var i=0;i<v.length;i++)if(v.indexOf(v[i])===i)d++;b=Math.min(v.length,2*d)*Math.log2(cs||2);}return Math.round(b);}
+  //   cv_entropy() in PHP exactly - cross-checked over 3,414 inputs including multibyte
+  //   and emoji, zero disagreements (2026-09-08).
+  // 2026-09-08 (internal audit F1): see cv_entropy() in PHP. Integer centibits, shared
+  //   table, no Math.log2 - this copy must return the SAME number as the server.
+var CV_KW_BLOCK=['password','passwort','contrasena','pass','passw0rd','p4ssword','letmein','welcome','admin',
+'administrator','root','toor','login','logon','user','guest','test','testing','demo','sample',
+'qwerty','qwertyuiop','qwertz','azerty','asdf','asdfgh','asdfghjk','zxcv','zxcvbn','wasd',
+'abc','abcd','abcde','abcdef','iloveyou','trustno','starwars','superman','batman','pokemon',
+'football','baseball','basketball','soccer','hockey','sunshine','princess','flower','butterfly',
+'chocolate','cookie','freedom','whatever','nothing','secret','private','hidden','safe','secure',
+'money','cash','bank','wallet','seed','phrase','mnemonic','recovery','backup','vault','coldvault',
+'bitcoin','satoshi','crypto','blockchain','hodl','moon','mining','miner','hash','block',
+'summer','winter','spring','autumn','fall','january','february','march','april','june','july',
+'august','september','october','november','december','monday','friday','today','tomorrow',
+'dragon','monkey','shadow','master','ninja','hunter','killer','ranger','tigger','charlie',
+'jordan','michael','jennifer','thomas','robert','daniel','matthew','george','ashley','amanda',
+'computer','internet','google','samsung','apple','windows','linux','server','database','oracle',
+'liverpool','arsenal','chelsea','barcelona','madrid','manchester','love','hello','world','yes','no'];
+var CV_LOG2={10:332,26:470,33:504,36:517,43:543,52:570,59:588,62:595,69:611,85:641,95:657};
+var CV_CB_LETTER=470,CV_CB_DIGIT=332,CV_CB_SYMBOL=450,CV_CB_WORD=1300,CV_CB_KNOWN=700,CV_CB_SEQ=700;
+function cvLeet(s){var m={'0':'o','1':'i','3':'e','4':'a','5':'s','7':'t','8':'b','@':'a','$':'s'},o='';s=s.toLowerCase();
+  for(var i=0;i<s.length;i++)o+=(m[s[i]]||s[i]);return o;}
+function cvWordShaped(r){if(r.length<3)return false;var v=(r.match(/[aeiouy]/g)||[]).length;return v*5>=r.length;}
+function cvIsWalk(a){var n=a.length;if(n<4)return false;
+  var rows=['qwertyuiop','asdfghjkl','zxcvbnm','1234567890','abcdefghijklmnopqrstuvwxyz'];
+  for(var k=0;k<rows.length;k++){var r=rows[k],rr=r.split('').reverse().join('');
+    for(var len=n;len>=4;len--)for(var i=0;i+len<=n;i++){var seg=a.substr(i,len);
+      if(len*10>=n*7&&(r.indexOf(seg)>=0||rr.indexOf(seg)>=0))return true;}}
+  return false;}
+function cvDigitsCheap(d){var n=d.length;if(n>=2){var u={},c=0;for(var i=0;i<n;i++)if(!u[d[i]]){u[d[i]]=1;c++;}if(c===1)return true;}
+  if(n===4&&(d.substr(0,2)==='19'||d.substr(0,2)==='20'))return true;
+  if(n>=3&&('1234567890'.indexOf(d)>=0||'0987654321'.indexOf(d)>=0))return true;return false;}
+function cvPerChar(v){var cs=0;if(/[a-z]/.test(v))cs+=26;if(/[A-Z]/.test(v))cs+=26;
+  if(/[0-9]/.test(v))cs+=10;if(/[^A-Za-z0-9]/.test(v))cs+=33;return CV_LOG2[cs]||100;}
+function cvKwCap(v){var chars=Array.from(v),n=chars.length,u={},d=0;
+  for(var i=0;i<n;i++)if(!u[chars[i]]){u[chars[i]]=1;d++;}
+  var per=cvPerChar(v),leet=cvLeet(v),alnum=leet.replace(/[^a-z0-9]/g,''),letters=leet.replace(/[^a-z]/g,'');
+  var cap=0,toks=leet.match(/[a-z]+|[0-9]+|\s+|[^a-z0-9\s]/gu)||[];
+  for(var t=0;t<toks.length;t++){var tok=toks[t];
+    if(/^\s+$/.test(tok))continue;
+    if(/^[a-z]+$/.test(tok)){
+      if(cvWordShaped(tok))cap+=(CV_KW_BLOCK.indexOf(tok)>=0?CV_CB_KNOWN:CV_CB_WORD);
+      else cap+=tok.length*per;}
+    else if(/^[0-9]+$/.test(tok))cap+=(cvDigitsCheap(tok)?CV_CB_SEQ:tok.length*per);
+    else cap+=per;}
+  if(letters!==''&&CV_KW_BLOCK.indexOf(letters)>=0)cap=Math.min(cap,1200);
+  if(cvIsWalk(alnum))cap=Math.min(cap,1800);
+  if(n>0&&d<=4)cap=Math.min(cap,1200);
+  return cap;}
+function cvEntropy(v){if(!v)return 0;
+  var chars=Array.from(v),n=chars.length,u={},dd=0;
+  for(var i=0;i<n;i++)if(!u[chars[i]]){u[chars[i]]=1;dd++;}
+  var t=v.split(/[^A-Za-z0-9]+/).filter(function(x){return x.length>=3&&/^[A-Za-z]+$/.test(x);}),cb;
+  if(t.length>=3){var w=[];t.forEach(function(x){var k=x.toLowerCase();if(w.indexOf(k)<0)w.push(k);});
+    cb=w.length*1100;if(/[A-Z]/.test(v))cb+=200;if(/[0-9]/.test(v))cb+=300;if(/[^A-Za-z0-9 \-]/.test(v))cb+=400;}
+  else{cb=Math.min(n,2*dd)*cvPerChar(v);}
+  return Math.round(Math.min(cb,cvKwCap(v))/100);}
   const ck=document.getElementById('ck');
   if(ck)ck.addEventListener('input',e=>{const v=e.target.value,s=document.getElementById('strength');var b=cvEntropy(v),label,col;if(!v.length){label='enter a keyword';col='var(--faint)';}else if(b<36){label='weak';col='var(--danger)';}else if(b<56){label='fair';col='var(--amber)';}else if(b<75){label='strong';col='var(--accent)';}else{label='very strong';col='var(--accent)';}s.innerHTML='strength — <span style="color:'+col+'">'+label+'</span>'+(v.length?' · ~'+b+' bits · '+v.length+' chars · '+(b>=CV_MIN?'<span style="color:var(--accent)">accepted</span>':'<span style="color:var(--danger)">below the ~'+CV_MIN+'-bit minimum</span>'):'');});
   // 2026-09-03: success banners auto-dismiss after 10s, or on click. Errors

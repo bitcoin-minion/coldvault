@@ -241,11 +241,18 @@ Ranked by how much they should worry you.
    feature, left in place. The sign-in path leaks nothing — an unknown username is gated
    identically to a known one.
 
-5. **The entropy estimator is an UPPER bound for human-invented keywords.** `Fluffy2019`
-   measures 60 bits and is refused only because it happens to fall under 65 — not because
-   the estimator understood it. A password-shaped keyword may be far weaker than its score
-   suggests. Use `tools/kwcheck.php --explain` for the methodology, and prefer **Generate**
-   over inventing one.
+5. **The entropy estimator is still an upper bound, but it is no longer a naive one.** Until
+   2026-09-08 it scored a non-passphrase as `length × log2(alphabet)`, which is true only of a
+   random string: `Password123!` measured 79 bits, `qwertyuiop123!` 86 and `Tr0ub4dor&3` 72, so
+   the 65-bit floor admitted exactly the shapes a cracking run tries first. The score is now
+   capped by a structural ceiling — leetspeak is folded first, a word-shaped run is charged what
+   a word costs rather than what its characters would be worth if random, and known passwords,
+   keyboard walks, years and repeats are charged almost nothing. Those three examples now measure
+   33, 18 and 26. A genuinely random string keeps its full value.
+   The ceiling cannot see everything: without a dictionary, a long lowercase run with a plausible
+   vowel ratio is charged as one unknown word whether or not it is one, so it will be refused even
+   if it was random. That direction is deliberate. **Prefer Generate over inventing a keyword**,
+   and use `tools/kwcheck.php --explain` for the methodology.
 
 6. **The sign-up throttle is site-wide.** `REG_MAX_PER_HOUR` counts registrations across
    the whole instance, because no per-address counter exists. So a sign-up flood can block
