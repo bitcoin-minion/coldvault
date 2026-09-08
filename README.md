@@ -187,13 +187,24 @@ has to survive into a second request.
 | | |
 |---|---|
 | **PHP** | 8.1 or newer. 7.4 works but has been end-of-life since November 2022 — do not use it. |
-| PHP extensions | `openssl`, `mysqli`, `json`. All standard. |
-| Optional | `gd` with FreeType — enables the raster CAPTCHA. Without it the SVG fallback is used automatically. |
+| PHP extensions | `openssl`, `mysqli`, `json`, `mbstring`, and `gd` **with FreeType**. All standard, and **all required** — the app refuses to start without `gd` or `mbstring`, deliberately, so a missing one is caught at install rather than in production. |
 | **Web server** | Apache 2.4 with `mod_rewrite` and `mod_headers`, and `AllowOverride All` for the document root. |
 | **Database** | MySQL 8.0+ or MariaDB 10.4+. |
 | **HTTPS** | Required on any reachable host — the app refuses to serve over plain HTTP, because the keyword *is* the encryption key. A host that already has a certificate needs **no extra configuration**; it also accepts `X-Forwarded-Proto: https` behind a proxy or CDN once `TRUST_FORWARDED_PROTO=1` is set. **You do not need a certificate to try it locally:** see below. |
 
-Not needed: `mbstring`, `curl`, `intl`, Composer, Node, any build step.
+Not needed: `curl`, `intl`, Composer, Node, any build step.
+
+Why `gd` and `mbstring` are hard requirements rather than nice-to-haves:
+
+- **`gd`** draws the CAPTCHA, which is the rate limiter on a passwordless sign-in. The old SVG
+  fallback drew each glyph as a grid of rectangles at the glyph's own bitmap coordinates, so it was
+  reconstructible straight from the markup — a bitmap emitted as vector markup always is. It was
+  removed rather than kept, because no CAPTCHA is safer than one that only looks like a CAPTCHA.
+- **`mbstring`** folds letter case in the keyword strength gate. PHP's byte-based `strtolower()`
+  folds only ASCII where the browser's `toLowerCase()` folds all of Unicode, and the two disagree
+  on 676 of 1,379 cased characters. That made the server score a mixed-case non-ASCII keyword
+  *higher* than the meter shown to the user — 81 bits against 40 — so the server accepted keywords
+  its own meter had refused. A silent fallback would restore that, so there is none.
 
 ---
 
@@ -314,7 +325,7 @@ coldvault/
 │   ├── env.php                reads coldvault.env — no output, no database
 │   ├── auth.php               TOTP, sessions, backup codes, registration, CSRF
 │   ├── crypto.php             pure crypto helpers. No I/O.
-│   ├── captcha.php            self-hosted CAPTCHA (GD, or SVG fallback)
+│   ├── captcha.php            self-hosted CAPTCHA (GD; no fallback, by design)
 │   ├── style.css  qrcode.js  words.js  .htaccess
 │   └── fonts/                 bundled IBM Plex woff2 + the CAPTCHA face
 ├── schema/coldvault.sql     structure only — no data, no users, no keys
@@ -448,5 +459,4 @@ Bundled third-party components are listed with their terms in
   `public/fonts/LICENSE-IBM-Plex.txt`). Bundled rather than loaded from Google Fonts, so
   the app makes no third-party request. latin and latin-ext subsets only.
 - **`public/fonts/DejaVuSans-Bold.ttf`** — DejaVu Fonts, under the DejaVu Fonts License
-  (see `public/fonts/LICENSE-DejaVu.txt`). Used only to draw the CAPTCHA when GD is
-  available.
+  (see `public/fonts/LICENSE-DejaVu.txt`). Used only to draw the CAPTCHA.

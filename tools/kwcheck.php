@@ -51,6 +51,18 @@ if (PHP_SAPI !== 'cli') {
     exit("kwcheck.php is a command-line tool and refuses to run over the web.\n");
 }
 
+/* 2026-09-08: mbstring is required, for the reason spelled out on cv_leet() below. Without it this
+   tool would score non-ASCII keywords differently from the app it is meant to mirror, which is
+   worse than not running at all - the whole point of this file is to tell you what the app will
+   decide. Note that PHP's own CLI may differ from the web server's build, so check here too. */
+if (!function_exists('mb_strtolower')) {
+    fwrite(STDERR, "This PHP build has no mbstring extension.\n"
+        . "kwcheck needs it to fold letter case exactly the way the app does; without it the\n"
+        . "scores below would not match what the app enforces. Install/enable mbstring, or run\n"
+        . "this with a PHP build that has it (the one serving the app does).\n");
+    exit(1);
+}
+
 /* ---- reject keywords passed as arguments (shell history + ps exposure) ---- */
 $FLAGS = ['--explain', '--selftest', '--help', '-h'];
 $mode  = 'check';
@@ -140,8 +152,13 @@ const CV_CB_SEQ    = 700;   // a year, or a sequential/repeating digit run
 function cv_chars($v) { $a = preg_split('//u', $v, -1, PREG_SPLIT_NO_EMPTY); return $a === false ? [] : $a; }
 
 /** leet-normalise: fold the substitutions a cracking rule set applies for free */
+/** 2026-09-08 (second independent review): mb_strtolower, NOT strtolower - the app enforces its
+ *  entropy floor with this fold, and strtolower() folds only ASCII where JavaScript's
+ *  toLowerCase() folds all of Unicode (676 of 1,379 cased characters differ). Getting this wrong
+ *  made the server score "ÄÖÜÀÈÌÒÙäöüàèìòù" at 81 bits where the browser meter said 40. This tool
+ *  must fold identically or it stops being a faithful port. mbstring is checked at startup. */
 function cv_leet($s) {
-    return strtr(strtolower($s), [
+    return strtr(mb_strtolower($s, 'UTF-8'), [
         '0'=>'o','1'=>'i','3'=>'e','4'=>'a','5'=>'s','7'=>'t','8'=>'b','@'=>'a','$'=>'s',
     ]);
 }

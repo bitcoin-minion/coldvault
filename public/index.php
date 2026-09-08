@@ -545,8 +545,19 @@ const CV_CB_SEQ    = 700;   // a year, or a sequential/repeating digit run
 function cv_chars($v) { $a = preg_split('//u', $v, -1, PREG_SPLIT_NO_EMPTY); return $a === false ? [] : $a; }
 
 /** leet-normalise: fold the substitutions a cracking rule set applies for free */
+// 2026-09-08 (second independent review): mb_strtolower, NOT strtolower. This is the case-folding
+//   step of the entropy gate, and the gate has two halves that must agree - PHP here, which
+//   ENFORCES the 65-bit floor, and the JS twin, which only shows the meter. strtolower() is
+//   byte-based and folds ASCII alone; JavaScript's toLowerCase() folds all of Unicode. Measured
+//   across 1,379 cased characters those two disagree on 676; mb_strtolower() agrees on all 1,379.
+//   The divergence ran SERVER-PERMISSIVE, the dangerous direction: "ÄÖÜÀÈÌÒÙäöüàèìòù" scored 81
+//   bits here and 40 in the browser, so the server accepted a keyword its own meter had refused.
+//   Unfolded "ÄÖÜ" counted as three more distinct symbols on top of "äöü", inflating the structural
+//   cap by ~5 bits per character. Greek and Cyrillic behaved identically.
+// ⚠️ mbstring is therefore a hard requirement, enforced in config.php so it is caught at install
+//   time. Do NOT add a strtolower() fallback here - that would restore this exact bug silently.
 function cv_leet($s) {
-    return strtr(strtolower($s), [
+    return strtr(mb_strtolower($s, 'UTF-8'), [
         '0'=>'o','1'=>'i','3'=>'e','4'=>'a','5'=>'s','7'=>'t','8'=>'b','@'=>'a','$'=>'s',
     ]);
 }

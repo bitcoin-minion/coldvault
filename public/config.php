@@ -172,6 +172,18 @@ function cv_unavailable() {
 // fallback was removed. Refuse to start without it, so this is caught at install, not in production.
 if (!function_exists('imagecreatetruecolor') || !function_exists('imagettftext')) { cv_unavailable(); }
 
+// 2026-09-08 (second independent review): mbstring is a hard requirement, for the same
+// caught-at-install reason as GD above. The keyword entropy gate exists in two halves - PHP on the
+// server, which ENFORCES the floor, and JavaScript in the browser, which shows the meter - and they
+// must agree. PHP's strtolower() is byte-based and folds only ASCII; JavaScript's toLowerCase()
+// folds all of Unicode. Measured over 1,379 cased characters, those two disagree on 676 of them,
+// while mb_strtolower() agrees with JavaScript on all 1,379. The divergence ran in the
+// server-PERMISSIVE direction: "ÄÖÜÀÈÌÒÙäöüàèìòù" scored 81 bits on the server and 40 in the
+// browser, so the server accepted a keyword its own meter had refused as too weak.
+// ⚠️ A silent fallback here would restore exactly that bug on any host missing the extension, so
+// this fails closed instead. See cv_leet() in index.php, which is the one place it matters.
+if (!function_exists('mb_strtolower')) { cv_unavailable(); }
+
 // ---------------------------------------------------------------------------
 // APP_KEY must decode to exactly 32 bytes, and the app REFUSES TO START
 // otherwise — deliberately no default and no fallback.

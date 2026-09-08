@@ -98,22 +98,38 @@ they were wrong, rather than quietly deleted, because the reasoning error is the
   regenerated. Two patterned shapes that still clear the floor are now pinned explicitly, so the
   gap is recorded rather than forgotten.
 
+### Fixed (medium severity, found while verifying the port)
+
+- **The entropy estimator's PHP and JavaScript halves disagreed on non-ASCII case folding.** Not a
+  review finding — this surfaced from a three-way parity check written to prove the port was
+  faithful, which is the reason such a check is worth writing. PHP's `strtolower()` is byte-based
+  and folds ASCII only; JavaScript's `toLowerCase()` folds all of Unicode. Measured across 1,379
+  cased characters, the two disagree on **676** of them, and the disagreement ran in the
+  server-permissive direction — the server ENFORCES the floor, the browser only displays a meter:
+
+  | keyword | server, before | browser meter | 65-bit floor |
+  |---|---|---|---|
+  | `ÄÖÜÀÈÌÒÙäöüàèìòù` | 81 — accepted | 40 — refused | crossed |
+  | `ÄÖÜÀÈÌÒÙÇÑäöüàèìòùçñ` | 101 — accepted | 50 — refused | crossed |
+  | `ΑΒΓΔΕΖΗΘαβγδεζηθ` (Greek) | 81 — accepted | 40 — refused | crossed |
+  | `АБВГДЕЖЗабвгдежз` (Cyrillic) | 81 — accepted | 40 — refused | crossed |
+
+  Unfolded `ÄÖÜ` counted as three further distinct symbols on top of `äöü`, inflating the
+  structural cap by roughly 5 bits per character. `cv_leet()` now uses `mb_strtolower()`, which
+  agrees with JavaScript on all 1,379 — so **`mbstring` is a hard requirement**, checked at
+  startup alongside `gd`. There is deliberately no fallback: a silent one would restore this exact
+  bug on any host missing the extension. All three copies of the estimator (server PHP, browser
+  twin, `tools/kwcheck.php`) now agree on all 423 candidates of the parity corpus.
+
 ### Known limitations, stated deliberately
 
 - The keyword entropy estimator charges a repeated or sequential letter run as a run rather than a
   word, which closes `aaa-bbb-ccc-…` shapes. **Shared-prefix (`aab-aac-aad-…`) and
   stem-plus-counter (`zzz zzz1 zzz2 …`) shapes still clear the 65-bit floor.** Closing those needs
   dictionary and pattern analysis rather than a structural ceiling.
-- **The estimator's PHP and JavaScript halves disagree on non-ASCII case folding.** PHP's
-  `strtolower()` is byte-based and does not fold `Ä`, `Α` or `А`; JavaScript's `toLowerCase()`
-  does. A keyword of mixed-case non-ASCII letters therefore scores higher on the server than in the
-  browser meter — the server-permissive direction — and can cross the floor while the meter refuses
-  it. Not yet fixed: every available fix is a trade (a new `mbstring` dependency, an incomplete
-  fold table, or restricting which characters a keyword may contain).
 - A per-account rate limit still cannot bound a large botnet, and no limit keyed on a username can
   be both denial-of-service-proof and guess-bounding without identifying the client.
 
----
 
 ## 2026-09-08 — security review
 

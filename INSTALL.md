@@ -60,7 +60,8 @@ systems; no `a2enmod` equivalent is needed.
 |---|---|
 | `php` | 8.1 or newer. `openssl` and `json` are compiled in. |
 | `php-mysql` / `php-mysqlnd` | The `mysqli` driver. Required. |
-| `php-gd` | **Optional.** Enables the raster CAPTCHA. Without it, an SVG fallback is used automatically — the app does not care either way. |
+| `php-gd` | **Required**, with FreeType. Draws the CAPTCHA, which is the rate limiter on a passwordless sign-in. The old SVG fallback was reconstructible from the page markup and has been removed; the app refuses to start without `gd`. |
+| `php-mbstring` | **Required.** Folds letter case in the keyword strength gate. Without it the server scores non-ASCII keywords higher than the meter shown to the user, and would accept keywords its own meter refused. The app refuses to start without it. |
 | `mod_rewrite` | Clean URLs (`/register/`, `/help/`, `/redeem/`, `/security/`). |
 | `mod_headers` | The static security headers in `public/.htaccess`. |
 | `certbot` | A free HTTPS certificate. HTTPS is **not optional** here. |
